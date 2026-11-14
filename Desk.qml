@@ -1647,7 +1647,7 @@ Item {
         }
       }
 
-      // Top bar: which board this is (click to switch) and a way to the full site.
+      // Top bar: the board name opens the board & lists menu; a way to the full site.
       Item {
         id: topBar
         visible: root.synced
@@ -1658,7 +1658,7 @@ Item {
         Rectangle {
           id: boardPill
           height: 30; radius: 15
-          width: Math.min(parent.width * 0.45, pillRow.implicitWidth + 28)
+          width: Math.min(parent.width * 0.6, pillRow.implicitWidth + 28)
           color: pillHover.hovered || root.switcherOpen ? "#241f35" : "#1b1729"
           border.width: 1
           border.color: root.switcherOpen ? root.heads[1] : root.cardBorder
@@ -1672,7 +1672,7 @@ Item {
               Repeater { model: root.slots; Rectangle { required property int index; width: 4; height: 12; radius: 1; color: root.heads[index] } }
             }
             Plain {
-              width: Math.min(implicitWidth, boardPill.parent.width * 0.45 - 70)
+              width: Math.min(implicitWidth, boardPill.parent.width * 0.6 - 70)
               elide: Text.ElideRight
               font.pixelSize: 13; font.weight: Font.Bold
               text: root.boardName || "BoardHydra"
@@ -1680,18 +1680,6 @@ Item {
             Plain { font.pixelSize: 10; color: root.mutedColor; anchors.verticalCenter: parent.verticalCenter; text: root.switcherOpen ? "\uf077" : "\uf078" }
           }
           HoverHandler { id: pillHover; cursorShape: Qt.PointingHandCursor }
-          TapHandler { onTapped: root.openSwitcher() }
-        }
-
-        Rectangle {
-          anchors { left: boardPill.right; leftMargin: 8 }
-          height: 30; radius: 15
-          width: listsText.implicitWidth + 28
-          color: root.switcherOpen ? Qt.alpha(root.heads[1], 0.28) : (listsHover.hovered ? "#241f35" : "#1b1729")
-          border.width: 1
-          border.color: root.switcherOpen || listsHover.hovered ? root.heads[1] : root.cardBorder
-          Plain { id: listsText; anchors.centerIn: parent; font.pixelSize: 12; text: "\uf1de  Board & lists" }
-          HoverHandler { id: listsHover; cursorShape: Qt.PointingHandCursor }
           TapHandler { onTapped: root.openSwitcher() }
         }
 

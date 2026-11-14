@@ -51,7 +51,7 @@ echo; echo "Lists on that board:"
 for i in "${!LISTS[@]}"; do printf "  %2d) %s\n" $((i+1)) "${LISTS[$i]}"; done
 echo
 echo "The desktop has four columns. Pick up to four lists by number, e.g. \"1 2 3 4\"."
-echo "(You can change them later from the Board & lists button on the desktop.)"
+echo "(You can change them later by clicking the board name at the top of the desktop board.)"
 read -rp "Lists [first four]: " -a PICKS
 CHOSEN=()
 for p in "${PICKS[@]:-}"; do
