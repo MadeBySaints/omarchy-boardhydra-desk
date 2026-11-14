@@ -125,6 +125,8 @@ Item {
 
   // ------------------------------------------------------------- list picker
   property var allLists: []           // every open list on the board: [{ id, name }]
+  property string listsFor: ""        // board id allLists was read from
+  readonly property string curBoardId: cfg ? String(cfg.boardId || "") : ""
   property int listMenuCol: -1
 
   function pickList(col, listId) {
@@ -219,8 +221,8 @@ Item {
     })
   }
 
+  // Leaves the panel open so the new board's lists can be picked straight away.
   function switchBoard(id) {
-    switcherOpen = false
     if (!synced || id === cfg.boardId) return
     openCardId = ""
     lastArchived = null
@@ -929,6 +931,7 @@ Item {
     var lists = snap && Array.isArray(snap.lists) ? snap.lists.filter(function(l) { return l && !l.closed && typeof l.id === "string" }) : []
     lists.sort(function(a, b) { return (a.pos || 0) - (b.pos || 0) })
     allLists = lists.slice(0, 100).map(function(l) { return { id: l.id, name: String(l.name || "").slice(0, 60) } })
+    listsFor = cfg.boardId
     var chosen = []
     var picks = pickedLists[cfg.boardId]
     if (Array.isArray(picks)) {
@@ -1589,7 +1592,7 @@ Item {
         Rectangle {
           id: boardPill
           height: 30; radius: 15
-          width: Math.min(parent.width * 0.6, pillRow.implicitWidth + 28)
+          width: Math.min(parent.width * 0.45, pillRow.implicitWidth + 28)
           color: pillHover.hovered || root.switcherOpen ? "#241f35" : "#1b1729"
           border.width: 1
           border.color: root.switcherOpen ? root.heads[1] : root.cardBorder
@@ -1603,7 +1606,7 @@ Item {
               Repeater { model: 3; Rectangle { required property int index; width: 4; height: 12; radius: 1; color: root.heads[index] } }
             }
             Plain {
-              width: Math.min(implicitWidth, boardPill.parent.width * 0.6 - 70)
+              width: Math.min(implicitWidth, boardPill.parent.width * 0.45 - 70)
               elide: Text.ElideRight
               font.pixelSize: 13; font.weight: Font.Bold
               text: root.boardName || "BoardHydra"
@@ -1611,6 +1614,18 @@ Item {
             Plain { font.pixelSize: 10; color: root.mutedColor; anchors.verticalCenter: parent.verticalCenter; text: root.switcherOpen ? "\uf077" : "\uf078" }
           }
           HoverHandler { id: pillHover; cursorShape: Qt.PointingHandCursor }
+          TapHandler { onTapped: root.openSwitcher() }
+        }
+
+        Rectangle {
+          anchors { left: boardPill.right; leftMargin: 8 }
+          height: 30; radius: 15
+          width: listsText.implicitWidth + 28
+          color: root.switcherOpen ? Qt.alpha(root.heads[1], 0.28) : (listsHover.hovered ? "#241f35" : "#1b1729")
+          border.width: 1
+          border.color: root.switcherOpen || listsHover.hovered ? root.heads[1] : root.cardBorder
+          Plain { id: listsText; anchors.centerIn: parent; font.pixelSize: 12; text: "\uf1de  Board & lists" }
+          HoverHandler { id: listsHover; cursorShape: Qt.PointingHandCursor }
           TapHandler { onTapped: root.openSwitcher() }
         }
 
@@ -1627,7 +1642,7 @@ Item {
         }
       }
 
-      // Board switcher menu
+      // Board & lists panel: pick the board, then which list fills each column.
       Item {
         anchors.fill: parent
         visible: root.switcherOpen && root.synced
@@ -1640,48 +1655,47 @@ Item {
         }
         Rectangle {
           y: 36
-          width: Math.min(360, parent.width - 20)
-          height: Math.min(parent.height - 50, Math.max(54, menuList.height + 16))
+          width: Math.min(420, parent.width - 20)
+          height: Math.min(parent.height - 50, panelCol.height + 16)
           radius: 14
           color: "#15121f"
           border.width: 1
           border.color: Qt.alpha(root.heads[1], 0.7)
           MouseArea { anchors.fill: parent; acceptedButtons: Qt.AllButtons }
 
-          Plain {
-            visible: root.boardListState !== "ok"
-            anchors.centerIn: parent
-            width: parent.width - 30
-            horizontalAlignment: Text.AlignHCenter
-            elide: Text.ElideRight
-            font.pixelSize: 12
-            color: root.boardListState === "error" ? root.badColor : root.mutedColor
-            text: root.boardListState === "error" ? root.boardListError : "Loading your boards…"
-          }
-
           Flickable {
-            visible: root.boardListState === "ok"
             anchors { fill: parent; margins: 8 }
-            contentHeight: menuList.height
+            contentHeight: panelCol.height
             clip: true
             boundsBehavior: Flickable.StopAtBounds
             Column {
-              id: menuList
+              id: panelCol
               width: parent.width
               spacing: 2
+
               Plain {
-                visible: root.boardList.length === 0
+                leftPadding: 8; topPadding: 4; bottomPadding: 4
+                font.pixelSize: 10; font.weight: Font.Bold; font.letterSpacing: 1
+                color: root.faintColor
+                text: "BOARD"
+              }
+              Plain {
+                visible: root.boardListState !== "ok" || root.boardList.length === 0
+                width: parent.width
                 padding: 10
-                font.pixelSize: 12; color: root.mutedColor
-                text: "No boards on this account."
+                elide: Text.ElideRight
+                font.pixelSize: 12
+                color: root.boardListState === "error" ? root.badColor : root.mutedColor
+                text: root.boardListState === "error" ? root.boardListError
+                    : root.boardListState === "ok" ? "No boards on this account." : "Loading your boards…"
               }
               Repeater {
-                model: root.boardList
+                model: root.boardListState === "ok" ? root.boardList : []
                 Rectangle {
                   id: boardRow
                   required property var modelData
-                  readonly property bool current: root.synced && modelData.id === root.cfg.boardId
-                  width: menuList.width
+                  readonly property bool current: root.synced && modelData.id === root.curBoardId
+                  width: panelCol.width
                   height: 40; radius: 9
                   color: rowHover.hovered ? "#241f35" : "transparent"
                   Rectangle {
@@ -1713,6 +1727,90 @@ Item {
                   HoverHandler { id: rowHover; cursorShape: Qt.PointingHandCursor }
                   TapHandler { onTapped: root.switchBoard(boardRow.modelData.id) }
                 }
+              }
+
+              Item { width: 1; height: 6 }
+              Rectangle { x: 8; width: parent.width - 16; height: 1; color: root.cardBorder }
+              Item { width: 1; height: 6 }
+
+              Item {
+                width: parent.width
+                height: 24
+                Plain {
+                  x: 8; anchors.verticalCenter: parent.verticalCenter
+                  font.pixelSize: 10; font.weight: Font.Bold; font.letterSpacing: 1
+                  color: root.faintColor
+                  text: "LISTS ON THE DESKTOP"
+                }
+                Plain {
+                  anchors { right: parent.right; rightMargin: 12; verticalCenter: parent.verticalCenter }
+                  font.pixelSize: 10; color: root.faintColor
+                  text: "column"
+                }
+              }
+              Plain {
+                visible: root.listsFor !== root.curBoardId || root.allLists.length === 0
+                width: parent.width
+                padding: 10
+                font.pixelSize: 12; color: root.mutedColor
+                text: root.listsFor !== root.curBoardId ? "Loading lists…" : "This board has no lists yet."
+              }
+              Repeater {
+                model: root.listsFor === root.curBoardId ? root.allLists : []
+                Rectangle {
+                  id: pickRow
+                  required property var modelData
+                  // Which desktop column shows this list, or -1.
+                  readonly property int shownIn: {
+                    for (var c = 0; c < root.board.columns.length; c++)
+                      if (root.board.columns[c].listId === modelData.id) return c
+                    return -1
+                  }
+                  width: panelCol.width
+                  height: 36; radius: 8
+                  color: pickHover.hovered ? "#1e1a2c" : "transparent"
+                  HoverHandler { id: pickHover }
+                  Plain {
+                    anchors { left: parent.left; leftMargin: 16; right: slots.left; rightMargin: 10; verticalCenter: parent.verticalCenter }
+                    elide: Text.ElideRight
+                    font.pixelSize: 13; font.weight: pickRow.shownIn >= 0 ? Font.Bold : Font.Normal
+                    color: pickRow.shownIn >= 0 ? root.textColor : root.mutedColor
+                    text: pickRow.modelData.name
+                  }
+                  Row {
+                    id: slots
+                    anchors { right: parent.right; rightMargin: 8; verticalCenter: parent.verticalCenter }
+                    spacing: 4
+                    Repeater {
+                      model: 3
+                      Rectangle {
+                        id: slotBtn
+                        required property int index
+                        readonly property bool on: pickRow.shownIn === index
+                        width: 26; height: 22; radius: 6
+                        color: on ? root.heads[index] : (slotHover.hovered ? Qt.alpha(root.heads[index], 0.25) : "transparent")
+                        border.width: on ? 0 : 1
+                        border.color: slotHover.hovered ? root.heads[index] : root.cardBorder
+                        Plain {
+                          anchors.centerIn: parent
+                          font.pixelSize: 11; font.weight: Font.Bold
+                          color: slotBtn.on ? "#0d0b14" : (slotHover.hovered ? root.textColor : root.faintColor)
+                          text: slotBtn.index + 1
+                        }
+                        HoverHandler { id: slotHover; cursorShape: Qt.PointingHandCursor }
+                        TapHandler { onTapped: root.pickList(slotBtn.index, pickRow.modelData.id) }
+                      }
+                    }
+                  }
+                }
+              }
+              Plain {
+                visible: root.listsFor === root.curBoardId && root.allLists.length > 3
+                width: parent.width
+                leftPadding: 16; topPadding: 6; bottomPadding: 4; rightPadding: 12
+                wrapMode: Text.WordWrap
+                font.pixelSize: 10; color: root.faintColor
+                text: "The desktop has three columns. Picking a list that's already shown swaps the two."
               }
             }
           }

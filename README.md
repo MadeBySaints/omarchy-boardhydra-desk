@@ -44,7 +44,7 @@ omarchy restart shell
 
 The script asks for an API key (BoardHydra → Settings → API keys; it starts with `bh_live_`) and lets you choose a board. It writes `~/.config/boardhydra-desk/config.json` with permissions 600. API calls count toward your plan's request quota.
 
-In synced mode you can open a card to edit its labels, members, due date, description, checklists and attachments. The top bar lets you switch boards and has a link to the full site.
+In synced mode you can open a card to edit its labels, members, due date, description, checklists and attachments. The top bar has a **Board & lists** button: pick a board, then choose which list fills each of the three desktop columns (1, 2, 3). Your picks are saved per board. There is also a link to the full site.
 
 ## Quick-add hotkey (optional)
 
