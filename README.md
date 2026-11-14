@@ -7,7 +7,7 @@ An [Omarchy](https://omarchy.org/) shell plugin that draws a live kanban board o
 ## Requirements
 
 - Omarchy with the Omarchy shell
-- The [BoardHydra theme](https://github.com/MadeBySaints/omarchy-boardhydra-theme), with the `2-board.png` wallpaper set. The plugin lines its columns up with the columns painted on that wallpaper.
+- The [BoardHydra theme](https://github.com/MadeBySaints/omarchy-boardhydra-theme), with the `2-board.png` wallpaper set. The plugin draws its own four columns over the ones painted on that wallpaper.
 
 ```bash
 omarchy theme install https://github.com/MadeBySaints/omarchy-boardhydra-theme.git
@@ -18,7 +18,7 @@ omarchy theme bg next
 ## Dependencies
 
 - **Local mode:** none beyond the Omarchy shell.
-- **Synced mode:** `curl` (API calls and the live event stream), `python3` (used only by `setup.sh`), and a [BoardHydra](https://boardhydra.com) account with an API key. Synced mode sends requests to `https://boardhydra.com` (or to `BOARDHYDRA_API_URL` if you set it when running `setup.sh`).
+- **Synced mode:** `curl` (API calls and the live event stream), `jq` (used only by `setup.sh`), and a [BoardHydra](https://boardhydra.com) account with an API key. Synced mode sends requests to `https://boardhydra.com` (or to `BOARDHYDRA_API_URL` if you set it when running `setup.sh`).
 - **Attachment uploads:** `omarchy-file-select`, which ships with Omarchy.
 
 All of these come with a standard Omarchy install.
@@ -34,7 +34,7 @@ omarchy restart shell
 
 ## Modes
 
-**Local (default).** You don't need an account. Cards are saved to `~/.local/share/boardhydra-desk.json`.
+**Local (default).** You don't need an account. Cards are saved to `~/.local/share/boardhydra-desk/board.json`, in a folder only you can read (mode 700). A file from an older version at `~/.local/share/boardhydra-desk.json` is moved there automatically.
 
 **Synced.** This connects the desktop to one of your BoardHydra boards and keeps it updated live:
 
@@ -42,9 +42,15 @@ omarchy restart shell
 ~/.config/omarchy/plugins/boardhydra.desk/setup.sh
 ```
 
-The script asks for an API key (BoardHydra → Settings → API keys; it starts with `bh_live_`) and lets you choose a board. It writes `~/.config/boardhydra-desk/config.json` with permissions 600. API calls count toward your plan's request quota.
+The script asks for an API key (BoardHydra → Settings → API keys; it starts with `bh_live_`) and lets you choose a board. It writes `~/.config/boardhydra-desk/config.json` with permissions 600. The key is passed to `curl` and `jq` on stdin, so it never appears in a process list. API calls count toward your plan's request quota. Attachment thumbnails are cached in `~/.cache/boardhydra-desk` (mode 700).
 
-In synced mode you can open a card to edit its labels, members, due date, description, checklists and attachments. The top bar has a **Board & lists** button: pick a board, then choose which list fills each of the three desktop columns (1, 2, 3). Your picks are saved per board. There is also a link to the full site.
+In synced mode you can open a card to edit its labels, members, due date, description, checklists and attachments. The top bar has a **Board & lists** button:
+
+- Pick a board.
+- Choose which list fills each of the four desktop slots (1–4). Click a lit number to leave that slot empty. Picking a list that's already shown swaps the two.
+- Under **Empty slots**, choose **Leave gaps** (every column stays in its slot) or **Center columns** (the shown columns close up in the middle).
+
+Your picks are saved per board in `~/.config/boardhydra-desk/state.json`. There is also a link to the full site.
 
 ## Quick-add hotkey (optional)
 

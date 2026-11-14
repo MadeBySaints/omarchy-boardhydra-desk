@@ -21,11 +21,15 @@ Item {
   property var manifest: null
 
   readonly property string home: Quickshell.env("HOME")
-  readonly property string dataPath: home + "/.local/share/boardhydra-desk.json"
+  // Local-mode cards live in a private (0700) folder; the old 0644 file is moved in.
+  readonly property string dataDir: home + "/.local/share/boardhydra-desk"
+  readonly property string oldDataPath: home + "/.local/share/boardhydra-desk.json"
+  property bool dirsReady: false
+  readonly property string dataPath: dirsReady ? dataDir + "/board.json" : ""
   readonly property string configPath: home + "/.config/boardhydra-desk/config.json"
 
-  // Brand palette (BoardHydra web tokens + the logo's three heads).
-  readonly property var heads: ["#2785c2", "#3ba597", "#4db381"]
+  // Brand palette (BoardHydra web tokens + a ramp across the logo's heads, one per slot).
+  readonly property var heads: ["#2785c2", "#349aa5", "#41aa90", "#4db381"]
   readonly property color textColor: "#ece6f7"
   readonly property color mutedColor: "#9a91b3"
   readonly property color faintColor: "#6c6487"
@@ -34,14 +38,38 @@ Item {
   readonly property color cardBorder: "#2d2742"
   readonly property color badColor: "#ff5d6c"
 
-  // Painted column geometry in the 3840x2160 wallpaper.
+  // Column geometry in 3840x2160 wallpaper pixels. Four slots span the
+  // three columns painted on the wallpaper; the desk paints the wallpaper's
+  // own gradient behind them (see `backdrop`) so the painted ones never show.
   readonly property real wpW: 3840
   readonly property real wpH: 2160
-  readonly property real colX: 558
+  readonly property int slots: 4
+  readonly property real colX: 160
   readonly property real colY: 379
-  readonly property real colW: 846
+  readonly property real colW: 820
   readonly property real colH: 1424
-  readonly property real colStride: 940
+  readonly property real colStride: 900
+  // Wallpaper background: a straight vertical gradient, top to bottom.
+  readonly property color wpTop: "#15121f"
+  readonly property color wpBottom: "#0d0b14"
+
+  // "gaps": a column stays in its slot and empty slots stay empty.
+  // "center": the shown columns close up and sit in the middle.
+  property string layout: "gaps"
+
+  function shownCols() {
+    var out = []
+    for (var i = 0; i < board.columns.length; i++)
+      if (!synced || board.columns[i].listId) out.push(i)
+    return out
+  }
+  // Left edge of column i, in strides from the first slot.
+  function colPos(i) {
+    if (synced && layout !== "center") return i
+    var vis = shownCols()
+    var k = vis.indexOf(i)
+    return (slots - vis.length) / 2 + Math.max(0, k)
+  }
 
   property bool onBoardWallpaper: false
   property bool loaded: false
@@ -72,7 +100,7 @@ Item {
     if (!/^bh_live_[A-Za-z0-9_-]{8,200}$/.test(key)) { console.warn("boardhydra.desk: missing or malformed apiKey"); return null }
     var boardId = String(c.boardId || "")
     if (!/^[A-Za-z0-9_-]{1,64}$/.test(boardId)) { console.warn("boardhydra.desk: missing boardId"); return null }
-    var lists = Array.isArray(c.lists) ? c.lists.slice(0, 3).map(function(n) { return String(n).slice(0, 100) }) : []
+    var lists = Array.isArray(c.lists) ? c.lists.slice(0, 4).map(function(n) { return String(n).slice(0, 100) }) : []
     var mins = Number(c.refreshMinutes)
     if (!(mins >= 2 && mins <= 1440)) mins = 10
     return { apiUrl: url, apiKey: key, boardId: boardId, lists: lists, refreshMinutes: mins, live: c.live !== false }
@@ -104,7 +132,7 @@ Item {
   property bool baseLoaded: false
   property bool stateLoaded: false
   property string pickedBoard: ""
-  property var pickedLists: ({})      // board id -> [list id, list id, list id]
+  property var pickedLists: ({})      // board id -> [list id or "", one per slot]
 
   function validPicks(obj) {
     var out = ({})
@@ -114,13 +142,13 @@ Item {
     for (var i = 0; i < keys.length; i++) {
       var v = obj[keys[i]]
       if (!idRe.test(keys[i]) || !Array.isArray(v)) continue
-      out[keys[i]] = v.slice(0, 3).map(function(x) { return idRe.test(String(x)) ? String(x) : "" })
+      out[keys[i]] = v.slice(0, 4).map(function(x) { return idRe.test(String(x)) ? String(x) : "" })
     }
     return out
   }
 
   function saveState() {
-    stateFile.setText(JSON.stringify({ boardId: pickedBoard, lists: pickedLists }, null, 2) + "\n")
+    stateFile.setText(JSON.stringify({ boardId: pickedBoard, lists: pickedLists, layout: layout }, null, 2) + "\n")
   }
 
   // ------------------------------------------------------------- list picker
@@ -129,13 +157,14 @@ Item {
   readonly property string curBoardId: cfg ? String(cfg.boardId || "") : ""
   property int listMenuCol: -1
 
+  // Show listId in slot col; "" leaves the slot empty.
   function pickList(col, listId) {
     listMenuCol = -1
-    if (!synced || col < 0 || col > 2) return
+    if (!synced || col < 0 || col >= slots) return
     var cur = []
-    for (var c = 0; c < 3; c++) cur.push(board.columns[c] ? (board.columns[c].listId || "") : "")
+    for (var c = 0; c < slots; c++) cur.push(board.columns[c] ? (board.columns[c].listId || "") : "")
     if (cur[col] === listId) return
-    var other = cur.indexOf(listId)
+    var other = listId ? cur.indexOf(listId) : -1
     if (other !== -1) cur[other] = cur[col]     // already on the desktop: swap the two columns
     cur[col] = listId
     var next = JSON.parse(JSON.stringify(pickedLists))
@@ -162,6 +191,7 @@ Item {
       } catch (e) {}
       var picksChanged = JSON.stringify(picks) !== JSON.stringify(root.pickedLists)
       root.pickedLists = picks
+      try { root.layout = JSON.parse(text()).layout === "center" ? "center" : "gaps" } catch (e2) {}
       root.pickedBoard = /^[A-Za-z0-9_-]{1,64}$/.test(id) ? id : ""
       var first = !root.stateLoaded
       root.stateLoaded = true
@@ -233,6 +263,12 @@ Item {
     applyCfg()
   }
 
+  function setLayout(mode) {
+    if (mode === layout) return
+    layout = mode
+    saveState()
+  }
+
   function openFullSite() {
     if (synced) Quickshell.execDetached(["xdg-open", cfg.apiUrl + "/app"])
   }
@@ -281,6 +317,20 @@ Item {
       out.columns.push({ title: title, cards: cards })
     }
     return out
+  }
+
+  // Make the private folders before anything is written into them.
+  Process {
+    running: true
+    command: ["sh", "-c",
+      'umask 077; mkdir -p "$1" "$2" && chmod 700 "$1" "$2" || exit 1; ' +
+      'if [ -f "$3" ] && [ ! -e "$1/board.json" ]; then mv -n "$3" "$1/board.json"; fi; ' +
+      '[ -f "$1/board.json" ] && chmod 600 "$1/board.json"; exit 0',
+      "sh", root.dataDir, root.cacheDir, root.oldDataPath]
+    onExited: function(code, status) {
+      if (code !== 0) console.warn("boardhydra.desk: couldn't create private folders")
+      root.dirsReady = true
+    }
   }
 
   FileView {
@@ -935,18 +985,12 @@ Item {
     var chosen = []
     var picks = pickedLists[cfg.boardId]
     if (Array.isArray(picks)) {
+      // Slots the user left empty (or whose list is gone) stay empty.
       var used = ({})
-      for (var s0 = 0; s0 < 3; s0++) {
+      for (var s0 = 0; s0 < slots; s0++) {
         var found = lists.filter(function(l) { return l.id === picks[s0] && !used[l.id] })[0] || null
         if (found) used[found.id] = true
         chosen.push(found)
-      }
-      // A picked list that no longer exists gives its column to the next unused list.
-      for (var s1 = 0; s1 < 3; s1++) {
-        if (chosen[s1]) continue
-        var spare = lists.filter(function(l) { return !used[l.id] })[0] || null
-        if (spare) used[spare.id] = true
-        chosen[s1] = spare
       }
     } else if (cfg.lists.length) {
       for (var n = 0; n < cfg.lists.length; n++) {
@@ -955,7 +999,7 @@ Item {
         chosen.push(hit || null)
       }
     } else {
-      chosen = lists.slice(0, 3)
+      chosen = lists.slice(0, slots)
     }
     var cards = snap && Array.isArray(snap.cards) ? snap.cards : []
     var lm = ({}), mm = ({}), ac = ({}), mn = ({})
@@ -988,9 +1032,9 @@ Item {
     bm.sort(function(a, b) { return a.name.toLowerCase() < b.name.toLowerCase() ? -1 : 1 })
     boardMembers = bm
     var cols = []
-    for (var c = 0; c < 3; c++) {
+    for (var c = 0; c < slots; c++) {
       var l = chosen[c] || null
-      var col = { title: l ? String(l.name).slice(0, 60) : (cfg.lists[c] ? cfg.lists[c] + " (not found)" : "—"),
+      var col = { title: l ? String(l.name).slice(0, 60) : "",
                   listId: l ? l.id : "", cards: [] }
       if (l) {
         var mine = cards.filter(function(k) { return k && !k.closed && k.idList === l.id && typeof k.id === "string" })
@@ -1344,8 +1388,9 @@ Item {
     return !!col && (!synced || !!col.listId)
   }
   function quickCycle(step) {
-    for (var i = 1; i <= 3; i++) {
-      var c = (quickCol + step * i + 3) % 3
+    var n = Math.max(1, board.columns.length)
+    for (var i = 1; i <= n; i++) {
+      var c = (quickCol + step * i + n * 4) % n
       if (quickUsable(c)) { quickCol = c; return }
     }
   }
@@ -1549,7 +1594,7 @@ Item {
       anchors { top: true; left: true }
       readonly property int barH: root.synced ? 44 : 0
       margins { left: Math.round(ox + root.colX * s); top: Math.round(oy + root.colY * s) - barH }
-      implicitWidth: Math.round(stride * 2 + cw)
+      implicitWidth: Math.round(stride * (root.slots - 1) + cw)
       implicitHeight: Math.round(root.colH * s) + barH
       color: "transparent"
       exclusionMode: ExclusionMode.Ignore
@@ -1567,7 +1612,13 @@ Item {
       property point dragGrab: Qt.point(0, 0)
 
       function dropTarget(x, y) {
-        var col = Math.max(0, Math.min(2, Math.floor((x + (stride - cw) / 2) / stride)))
+        var vis = root.shownCols()
+        var col = vis.length ? vis[0] : 0
+        var best = 1e9
+        for (var v = 0; v < vis.length; v++) {
+          var d = Math.abs(x - (root.colPos(vis[v]) * stride + cw / 2))
+          if (d < best) { best = d; col = vis[v] }
+        }
         var colItem = columns.itemAt(col)
         if (!colItem) return { col: col, idx: 0 }
         var rep = colItem.cardRepeater
@@ -1579,6 +1630,21 @@ Item {
           if (y < p.y + it.height / 2) { idx = i; break }
         }
         return { col: col, idx: idx }
+      }
+
+      // The wallpaper's own gradient, sized and placed as the wallpaper is, so
+      // the columns painted on it are hidden and gaps look like bare wallpaper.
+      Rectangle {
+        id: backdrop
+        z: -1
+        x: win.ox - win.margins.left
+        y: win.oy - win.margins.top
+        width: Math.round(root.wpW * win.s)
+        height: Math.round(root.wpH * win.s)
+        gradient: Gradient {
+          GradientStop { position: 0; color: root.wpTop }
+          GradientStop { position: 1; color: root.wpBottom }
+        }
       }
 
       // Top bar: which board this is (click to switch) and a way to the full site.
@@ -1603,7 +1669,7 @@ Item {
             Row {
               spacing: 2
               anchors.verticalCenter: parent.verticalCenter
-              Repeater { model: 3; Rectangle { required property int index; width: 4; height: 12; radius: 1; color: root.heads[index] } }
+              Repeater { model: root.slots; Rectangle { required property int index; width: 4; height: 12; radius: 1; color: root.heads[index] } }
             }
             Plain {
               width: Math.min(implicitWidth, boardPill.parent.width * 0.45 - 70)
@@ -1782,7 +1848,7 @@ Item {
                     anchors { right: parent.right; rightMargin: 8; verticalCenter: parent.verticalCenter }
                     spacing: 4
                     Repeater {
-                      model: 3
+                      model: root.slots
                       Rectangle {
                         id: slotBtn
                         required property int index
@@ -1798,19 +1864,60 @@ Item {
                           text: slotBtn.index + 1
                         }
                         HoverHandler { id: slotHover; cursorShape: Qt.PointingHandCursor }
-                        TapHandler { onTapped: root.pickList(slotBtn.index, pickRow.modelData.id) }
+                        // Clicking the lit slot empties it.
+                        TapHandler { onTapped: root.pickList(slotBtn.index, slotBtn.on ? "" : pickRow.modelData.id) }
                       }
                     }
                   }
                 }
               }
               Plain {
-                visible: root.listsFor === root.curBoardId && root.allLists.length > 3
+                visible: root.listsFor === root.curBoardId && root.allLists.length > 0
                 width: parent.width
                 leftPadding: 16; topPadding: 6; bottomPadding: 4; rightPadding: 12
                 wrapMode: Text.WordWrap
                 font.pixelSize: 10; color: root.faintColor
-                text: "The desktop has three columns. Picking a list that's already shown swaps the two."
+                text: "Click a lit number to empty that slot. Picking a list that's already shown swaps the two."
+              }
+
+              Item { width: 1; height: 6 }
+              Rectangle { x: 8; width: parent.width - 16; height: 1; color: root.cardBorder }
+              Item { width: 1; height: 6 }
+
+              Item {
+                width: parent.width
+                height: 34
+                Plain {
+                  x: 8; anchors.verticalCenter: parent.verticalCenter
+                  font.pixelSize: 10; font.weight: Font.Bold; font.letterSpacing: 1
+                  color: root.faintColor
+                  text: "EMPTY SLOTS"
+                }
+                Row {
+                  anchors { right: parent.right; rightMargin: 8; verticalCenter: parent.verticalCenter }
+                  spacing: 4
+                  Repeater {
+                    model: [{ key: "gaps", label: "Leave gaps" }, { key: "center", label: "Center columns" }]
+                    Rectangle {
+                      id: layoutBtn
+                      required property var modelData
+                      readonly property bool on: root.layout === modelData.key
+                      width: layoutText.implicitWidth + 22; height: 24; radius: 12
+                      color: on ? Qt.alpha(root.heads[1], 0.28) : (layoutHover.hovered ? "#241f35" : "transparent")
+                      border.width: 1
+                      border.color: on || layoutHover.hovered ? root.heads[1] : root.cardBorder
+                      Plain {
+                        id: layoutText
+                        anchors.centerIn: parent
+                        font.pixelSize: 11; font.weight: layoutBtn.on ? Font.Bold : Font.Normal
+                        color: layoutBtn.on ? root.textColor : root.mutedColor
+                        text: layoutBtn.modelData.label
+                      }
+                      HoverHandler { id: layoutHover; cursorShape: Qt.PointingHandCursor }
+                      TapHandler { onTapped: root.setLayout(layoutBtn.modelData.key) }
+                    }
+                  }
+                }
               }
             }
           }
@@ -1859,7 +1966,8 @@ Item {
             property alias cardRepeater: cardRep
             property bool adding: false
 
-            x: Math.round(index * win.stride)
+            visible: column.usable
+            x: Math.round(root.colPos(index) * win.stride)
             width: Math.round(win.cw)
             height: parent.height
             radius: Math.round(24 * win.s)
@@ -1897,7 +2005,7 @@ Item {
             // Sync status (bottom of the last column, synced mode). Click to refresh now.
             Rectangle {
               id: syncChip
-              visible: column.index === 2 && root.synced
+              visible: root.synced && column.index === root.shownCols().slice(-1)[0]
               anchors { right: parent.right; rightMargin: 12; bottom: parent.bottom; bottomMargin: 10 }
               height: 24; radius: 12
               width: Math.min(syncLabel.implicitWidth + 32, column.width - 24)
@@ -2121,7 +2229,7 @@ Item {
                             required property var modelData
                             required property int index
                             width: 22; height: 22; radius: 11
-                            color: Qt.tint(root.cardColor, Qt.alpha(root.heads[index % 3], 0.45))
+                            color: Qt.tint(root.cardColor, Qt.alpha(root.heads[index % root.heads.length], 0.45))
                             border.width: 1; border.color: root.cardColor
                             Plain { anchors.centerIn: parent; font.pixelSize: 9; font.weight: Font.Bold; text: parent.modelData }
                           }
@@ -2232,7 +2340,7 @@ Item {
           }
           Rectangle {
             readonly property int col: Math.max(0, root.listMenuCol)
-            x: Math.round(col * win.stride) + 10
+            x: Math.round(root.colPos(col) * win.stride) + 10
             y: 46
             width: Math.round(win.cw) - 20
             height: Math.min(parent.height - 60, Math.max(48, listMenu.height + 16))
@@ -2255,6 +2363,18 @@ Item {
                   padding: 8
                   font.pixelSize: 12; color: root.mutedColor
                   text: "This board has no lists yet."
+                }
+                Rectangle {
+                  width: listMenu.width
+                  height: 34; radius: 8
+                  color: clearHover.hovered ? "#241f35" : "transparent"
+                  Plain {
+                    anchors { left: parent.left; leftMargin: 28; verticalCenter: parent.verticalCenter }
+                    font.pixelSize: 12; font.italic: true; color: root.mutedColor
+                    text: "Leave this slot empty"
+                  }
+                  HoverHandler { id: clearHover; cursorShape: Qt.PointingHandCursor }
+                  TapHandler { onTapped: root.pickList(root.listMenuCol, "") }
                 }
                 Repeater {
                   model: root.allLists
@@ -3267,7 +3387,7 @@ Item {
           id: archivedBar
           readonly property var e: root.lastArchived
           visible: e !== null && root.synced
-          x: Math.round((e ? e.col : 0) * win.stride) + 12
+          x: Math.round(root.colPos(e ? e.col : 0) * win.stride) + 12
           y: parent.height - height - 44
           width: Math.round(win.cw) - 24
           height: 62; radius: 12

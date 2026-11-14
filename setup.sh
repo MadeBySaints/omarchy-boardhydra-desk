@@ -18,25 +18,22 @@ fi
 
 TMP=$(mktemp -d); trap 'rm -rf "$TMP"' EXIT
 call() { # path -> body in $TMP/out, prints HTTP status
-  curl -sS --max-time 15 --max-filesize 10485760 -o "$TMP/out" -w '%{http_code}' \
-    -H "Authorization: Bearer $KEY" -H 'Accept: application/json' "$API_URL$1"
+  # Headers go in on stdin (printf is a builtin), so the key never shows in a process list.
+  printf 'Authorization: Bearer %s\nAccept: application/json\n' "$KEY" |
+    curl -sS --max-time 15 --max-filesize 10485760 -o "$TMP/out" -w '%{http_code}' -H @- -- "$API_URL$1"
 }
+# Printable text only, cut to $2 characters.
+CLEAN='def clean($n): tostring | gsub("[[:cntrl:]]"; "") | .[0:$n];'
 
 status=$(call /api/v1/boards)
 if [[ "$status" != 200 ]]; then
-  echo "Couldn't list boards (HTTP $status): $(python3 -I -c 'import json,sys
-try: print(json.load(open(sys.argv[1])).get("error",""))
-except Exception: print("")' "$TMP/out")" >&2
+  echo "Couldn't list boards (HTTP $status): $(jq -r '.error? // ""' "$TMP/out" 2>/dev/null)" >&2
   exit 1
 fi
 
-python3 -I - "$TMP/out" > "$TMP/boards.tsv" <<'PY'
-import json, sys
-for b in json.load(open(sys.argv[1]))[:50]:
-    name = "".join(ch for ch in str(b.get("name", "")) if ch.isprintable())[:60]
-    team = "".join(ch for ch in str(b.get("teamName") or "") if ch.isprintable())[:40]
-    print(f'{b["id"]}\t{name}\t{team}\t{b.get("cardCount", 0)}')
-PY
+jq -r "$CLEAN"' .[:50][] | select(.id | type == "string" and test("^[A-Za-z0-9_-]{1,64}$"))
+  | [.id, (.name // "" | clean(60)), (.teamName // "" | clean(40)), (.cardCount // 0 | tostring)] | @tsv' \
+  "$TMP/out" > "$TMP/boards.tsv"
 if [[ ! -s "$TMP/boards.tsv" ]]; then echo "No boards on this account yet." >&2; exit 1; fi
 
 echo; echo "Your boards:"
@@ -48,34 +45,29 @@ BOARD_ID=$(awk -F'\t' -v n="$PICK" 'NR==n {print $1}' "$TMP/boards.tsv")
 
 status=$(call "/api/v1/boards/$BOARD_ID")
 [[ "$status" == 200 ]] || { echo "Couldn't open that board (HTTP $status)." >&2; exit 1; }
-mapfile -t LISTS < <(python3 -I -c '
-import json, sys
-d = json.load(open(sys.argv[1]))
-for l in sorted((l for l in d.get("lists", []) if not l.get("closed")), key=lambda l: l.get("pos", 0)):
-    print("".join(ch for ch in str(l.get("name", "")) if ch.isprintable())[:100])' "$TMP/out")
+mapfile -t LISTS < <(jq -r "$CLEAN"' .lists // [] | map(select(.closed | not)) | sort_by(.pos // 0)[] | .name // "" | clean(100)' "$TMP/out")
 
 echo; echo "Lists on that board:"
 for i in "${!LISTS[@]}"; do printf "  %2d) %s\n" $((i+1)) "${LISTS[$i]}"; done
 echo
-echo "The desktop has three columns. Pick three lists by number, e.g. \"1 2 3\"."
-read -rp "Lists [first three]: " -a PICKS
+echo "The desktop has four columns. Pick up to four lists by number, e.g. \"1 2 3 4\"."
+echo "(You can change them later from the Board & lists button on the desktop.)"
+read -rp "Lists [first four]: " -a PICKS
 CHOSEN=()
 for p in "${PICKS[@]:-}"; do
   [[ "$p" =~ ^[0-9]+$ ]] && (( p >= 1 && p <= ${#LISTS[@]} )) && CHOSEN+=("${LISTS[$((p-1))]}")
 done
-CHOSEN=("${CHOSEN[@]:0:3}")
+CHOSEN=("${CHOSEN[@]:0:4}")
 
 read -rp "Background refresh every how many minutes? [10]: " MINS; MINS=${MINS:-10}
 [[ "$MINS" =~ ^[0-9]+$ ]] && (( MINS >= 2 )) || MINS=10
 
 mkdir -p "$CONF_DIR"; chmod 700 "$CONF_DIR"
 umask 077
-python3 -I - "$CONF.tmp" "$API_URL" "$KEY" "$BOARD_ID" "$MINS" "${CHOSEN[@]}" <<'PY'
-import json, sys
-out, url, key, board, mins, *lists = sys.argv[1:]
-json.dump({"apiUrl": url, "apiKey": key, "boardId": board, "lists": lists,
-           "refreshMinutes": int(mins)}, open(out, "w"), indent=2)
-PY
+# The key goes in on stdin; only non-secret values are arguments.
+printf '%s' "$KEY" | jq -Rs --arg url "$API_URL" --arg board "$BOARD_ID" --argjson mins "$MINS" \
+  '{apiUrl: $url, apiKey: ., boardId: $board, lists: $ARGS.positional, refreshMinutes: $mins}' \
+  --args "${CHOSEN[@]}" > "$CONF.tmp"
 mv "$CONF.tmp" "$CONF"; chmod 600 "$CONF"
 
 echo
