@@ -1,5 +1,7 @@
 # BoardHydra Desk
 
+![BoardHydra Desk](preview.png)
+
 An [Omarchy](https://omarchy.org/) shell plugin that draws a live kanban board on your desktop. You can add, edit, drag, archive and delete cards right on the wallpaper. It works offline by itself, or you can sync it with a board on [BoardHydra](https://boardhydra.com).
 
 ## Requirements
@@ -12,6 +14,14 @@ omarchy theme install https://github.com/MadeBySaints/omarchy-boardhydra-theme.g
 # cycle to the board wallpaper if it isn't showing:
 omarchy theme bg next
 ```
+
+## Dependencies
+
+- **Local mode:** none beyond the Omarchy shell.
+- **Synced mode:** `curl` (API calls and the live event stream), `python3` (used only by `setup.sh`), and a [BoardHydra](https://boardhydra.com) account with an API key. Synced mode sends requests to `https://boardhydra.com` (or to `BOARDHYDRA_API_URL` if you set it when running `setup.sh`).
+- **Attachment uploads:** `omarchy-file-select`, which ships with Omarchy.
+
+All of these come with a standard Omarchy install.
 
 ## Install
 
