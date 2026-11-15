@@ -76,3 +76,32 @@ Run `bash tests/workspaces.sh` from a running Omarchy desktop to check workspace
 ## License
 
 MIT
+
+## Storage security and validation
+
+Version 1.1.1 validates every existing ancestor of the data, configuration and
+thumbnail cache directories before enabling storage. Ancestors must belong to
+you or root and must not be writable by another group or user; root-owned sticky
+directories such as `/tmp` are allowed. Symlink paths are rejected. Existing JSON
+files must be regular files owned by you with a single hard link; they are made
+private (mode 600). Directory creation, migration or permission failures leave
+storage disabled.
+
+If initialization reports unsafe storage, inspect ownership and permissions of
+`~/.local/share`, `~/.config`, `~/.cache` (or `XDG_CACHE_HOME`) and their ancestors.
+Use real directories with private ownership. Restart the shell after correcting
+the path. The plugin does not change permissions on shared ancestors.
+
+This prevents another local UID from replacing a private folder through a
+shared ancestor after startup. Changes made later by your own UID or root are
+outside this protection.
+
+Run `node --test tests/storage.test.mjs` for storage regressions, and
+`bash tests/workspaces.sh` from an Omarchy desktop for workspace persistence and
+failure-path integration tests. Run `omarchy plugin validate .` before release.
+Releases follow a branch → validation → pull request → merge → version tag and
+GitHub release sequence. Publish a prepared draft only after its pull request is
+merged, targeting the merged commit. Marketplace approval is a separate step:
+continue a pending submission on its existing issue and edit it to rerun
+validation against the new default-branch commit. Updates to an already listed
+plugin use the [exact-commit verification process](https://github.com/omacom/omarchy-plugin-marketplace/blob/main/SUBMISSION.md#update-an-existing-listing).
