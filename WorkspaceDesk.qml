@@ -5,6 +5,7 @@ import Quickshell.Wayland
 import Quickshell.Hyprland
 import qs.Commons
 import "Colors.js" as Colors
+import "Storage.js" as Storage
 
 // A live kanban board laid exactly over the three painted columns of the
 // BoardHydra "2-board" wallpaper. It sits on the Bottom layer: above the
@@ -336,15 +337,13 @@ Item {
   Process {
     running: true
     command: ["sh", "-c",
-      'umask 077; mkdir -p "$1" "$2" && chmod 700 "$1" "$2" || exit 1; ' +
+      Storage.prepare +
       'if [ -f "$3" ] && [ ! -e "$1/board.json" ]; then mv -n "$3" "$1/board.json"; fi; ' +
-      '[ -f "$1/board.json" ] && chmod 600 "$1/board.json"; ' +
-      'mkdir -p "$4" && chmod 700 "$4" || exit 1; ' +
       'if [ -f "$4/state.json" ] && [ ! -e "$4/workspace-$5.json" ]; then cp -n "$4/state.json" "$4/workspace-$5.json"; fi; ' +
       'if [ "$5" = 1 ] && [ -f "$1/board.json" ] && [ ! -e "$1/workspace-1.json" ]; then cp -n "$1/board.json" "$1/workspace-1.json"; fi; exit 0',
       "sh", root.dataDir, root.cacheDir, root.oldDataPath, root.home + "/.config/boardhydra-desk", String(root.workspaceId)]
     onExited: function(code, status) {
-      if (code !== 0) console.warn("boardhydra.desk: couldn't create private folders")
+      if (code !== 0) console.warn("boardhydra.desk: unsafe storage path or private folder initialization failed")
       if (code === 0) root.dirsReady = true
     }
   }
