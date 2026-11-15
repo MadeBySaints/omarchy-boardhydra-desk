@@ -101,4 +101,7 @@ Run `node --test tests/storage.test.mjs` for storage regressions, and
 failure-path integration tests. Run `omarchy plugin validate .` before release.
 Releases follow a branch → validation → pull request → merge → version tag and
 GitHub release sequence. Publish a prepared draft only after its pull request is
-merged, targeting the merged commit.
+merged, targeting the merged commit. Marketplace approval is a separate step:
+continue a pending submission on its existing issue and edit it to rerun
+validation against the new default-branch commit. Updates to an already listed
+plugin use the [exact-commit verification process](https://github.com/omacom/omarchy-plugin-marketplace/blob/main/SUBMISSION.md#update-an-existing-listing).

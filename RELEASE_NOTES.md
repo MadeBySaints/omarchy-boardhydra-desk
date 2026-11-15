@@ -23,4 +23,3 @@ The plugin logs an initialization warning rather than enabling unsafe storage.
 
 Validation: storage regression tests, live Quickshell workspace persistence and
 failed-initialization tests, shell syntax checks and Omarchy plugin validation.
-This patch does not include the uncommitted shared-board and appearance changes.
