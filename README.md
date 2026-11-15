@@ -34,7 +34,7 @@ omarchy restart shell
 
 ## Modes
 
-**Local (default).** You don't need an account. Cards are saved to `~/.local/share/boardhydra-desk/board.json`, in a folder only you can read (mode 700). A file from an older version at `~/.local/share/boardhydra-desk.json` is moved there automatically.
+**Local (default).** You don't need an account. Each workspace has its own cards, saved to `~/.local/share/boardhydra-desk/workspace-<id>.json`, in a folder only you can read (mode 700). A file from an older version at `~/.local/share/boardhydra-desk.json` is moved there automatically and imported into workspace 1. Existing `board.json` cards are also imported into workspace 1.
 
 **Synced.** This connects the desktop to one of your BoardHydra boards and keeps it updated live:
 
@@ -46,15 +46,15 @@ The script asks for an API key (BoardHydra → Settings → API keys; it starts 
 
 In synced mode you can open a card to edit its labels, members, due date, description, checklists and attachments. Click the board name in the top bar to open its menu:
 
-- Pick a board.
+- Pick a board for the current workspace. Switching workspaces restores that workspace’s board; monitors can show different boards at the same time.
 - Choose which list fills each of the four desktop slots (1–4). Click a lit number to leave that slot empty. Picking a list that's already shown swaps the two.
 - Under **Empty slots**, choose **Leave gaps** (every column stays in its slot) or **Center columns** (the shown columns close up in the middle).
 
-Your picks are saved per board in `~/.config/boardhydra-desk/state.json`. There is also a link to the full site.
+Board, list and layout choices are saved independently for each workspace in `~/.config/boardhydra-desk/workspace-<id>.json`. Existing `state.json` choices are copied as the initial defaults when a workspace is first used. There is also a link to the full site.
 
 ## Quick-add hotkey (optional)
 
-To add a card from anywhere, put this in `~/.config/hypr/bindings.lua`:
+Quick-add targets the board on the focused monitor’s active workspace. To add a card from anywhere, put this in `~/.config/hypr/bindings.lua`:
 
 ```lua
 o.bind("SUPER + ALT + B", "BoardHydra quick add", "omarchy-shell boardhydra-desk quickAdd")
@@ -68,6 +68,10 @@ omarchy plugin remove boardhydra.desk
 ```
 
 Service plugins don't hot-reload, so run `omarchy restart shell` after every update.
+
+## Validation
+
+Run `bash tests/workspaces.sh` from a running Omarchy desktop to check workspace isolation, persistence, and focused-monitor quick-add routing with temporary data.
 
 ## License
 
