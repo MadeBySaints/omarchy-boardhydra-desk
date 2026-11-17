@@ -5,6 +5,8 @@ import Quickshell.Wayland
 import Quickshell.Hyprland
 import qs.Commons
 import "Colors.js" as Colors
+import "Appearance.js" as Appearance
+import "BoardTools.js" as Tools
 import "Storage.js" as Storage
 
 // A live kanban board laid exactly over the three painted columns of the
@@ -15,23 +17,17 @@ import "Storage.js" as Storage
 //  - synced: ~/.config/boardhydra-desk/config.json names an API key and a
 //    board; the columns are that board's lists, read and written through the
 //    BoardHydra /api/v1 developer API.
-//  - local: each workspace has its own private card file.
+//  - local: one private card file shared by every workspace.
 Item {
   id: root
 
   property var shell: null
   property var manifest: null
-  required property var workspace
-  readonly property int workspaceId: workspace.id
-  readonly property var workspaceScreens: Quickshell.screens.filter(function(screen) {
-    var monitor = Hyprland.monitorFor(screen)
-    return monitor && monitor.activeWorkspace && monitor.activeWorkspace.id === root.workspaceId
-  })
-  onWorkspaceScreensChanged: {
-    quickOpen = false
-    switcherOpen = false
-    listMenuCol = -1
-    openCardId = ""
+  required property var sharedEnvironment
+  readonly property var boardScreens: Quickshell.screens
+  readonly property int migrationWorkspace: {
+    var monitor = Hyprland.focusedMonitor
+    return monitor && monitor.activeWorkspace ? monitor.activeWorkspace.id : 1
   }
 
   readonly property string home: Quickshell.env("HOME")
@@ -39,11 +35,32 @@ Item {
   readonly property string dataDir: home + "/.local/share/boardhydra-desk"
   readonly property string oldDataPath: home + "/.local/share/boardhydra-desk.json"
   property bool dirsReady: false
-  readonly property string dataPath: dirsReady ? dataDir + "/workspace-" + workspaceId + ".json" : ""
+  readonly property string dataPath: dirsReady ? dataDir + "/board.json" : ""
   readonly property string configPath: home + "/.config/boardhydra-desk/config.json"
 
   // Brand palette (BoardHydra web tokens + a ramp across the logo's heads, one per slot).
-  readonly property var heads: ["#2785c2", "#349aa5", "#41aa90", "#4db381"]
+  property var appearance: Appearance.validate(null)
+  property bool appearanceOpen: false
+  readonly property var surface: Appearance.preset(appearance.preset)
+  readonly property var heads: Appearance.accents(appearance)
+  readonly property color surfaceTone: surface.tone
+  readonly property color surfaceCard: appearance.tint || surface.base
+  readonly property color surfaceInk: Appearance.ink(String(surfaceCard))
+
+  function setAppearance(patch) {
+    if (!stateLoaded) return
+    var next = JSON.parse(JSON.stringify(appearance))
+    Object.keys(patch).forEach(function(key) { next[key] = patch[key] })
+    appearance = Appearance.validate(next)
+    saveState()
+  }
+
+  function setAccent(index, value) {
+    if (index < 0 || index >= slots || !Appearance.hex(value)) return
+    var next = appearance.accents.slice()
+    next[index] = value
+    setAppearance({ accents: next })
+  }
   readonly property color textColor: "#ece6f7"
   readonly property color mutedColor: "#9a91b3"
   readonly property color faintColor: "#6c6487"
@@ -85,9 +102,191 @@ Item {
     return (slots - vis.length) / 2 + Math.max(0, k)
   }
 
-  property bool onBoardWallpaper: false
+  readonly property bool onBoardWallpaper: sharedEnvironment.onBoardWallpaper
   property bool loaded: false
   property var board: ({ columns: [] })
+
+  // Filters never make API calls; card indexes stay in the original model.
+  property var filters: ({ query: "", status: "all", due: "all", label: "", member: "" })
+  readonly property bool filtersActive: !!filters.query.trim() || filters.status !== "all" || filters.due !== "all" || !!filters.label || !!filters.member
+  property bool selectionMode: false
+  property var selectedIds: []
+  property bool toolsOpen: false
+  property string toolsTab: "filters"
+  property bool batchBusy: false
+  property string toolsMessage: ""
+  onFiltersChanged: selectedIds = []
+  onBoardChanged: selectedIds = (selectedIds || []).filter(function(id) { return !!root.findCard(id) })
+
+  function cardDetails(card) {
+    if (!card) return { desc: "", raw: [], checklists: [], members: [], labelIds: [], memberIds: [] }
+    if (synced) return detailMap[card.id] || { desc: "", raw: [], checklists: [], members: [], labelIds: [], memberIds: [] }
+    return { desc: card.desc || "", raw: card.checklists || [], checklists: checklistRows(card.checklists || []), members: [], labelIds: [], memberIds: [] }
+  }
+  function matchesCard(card) {
+    if (!filtersActive) return true
+    var detail = synced ? (detailMap[card.id] || {}) : { desc: card.desc || "" }
+    return Tools.matches(card, detail, filters, filters.due === "all" ? 0 : now)
+  }
+  function visibleCount(cards) { return cards.filter(function(card) { return root.matchesCard(card) }).length }
+  function setFilter(key, value) {
+    var next = Object.assign({}, filters)
+    next[key] = value
+    filters = next
+  }
+  function resetFilters() { filters = { query: "", status: "all", due: "all", label: "", member: "" } }
+  function showTools(tab) {
+    toolsTab = tab
+    toolsOpen = true
+    appearanceOpen = false
+    switcherOpen = false
+    listMenuCol = -1
+  }
+  function toggleSelection(id) {
+    if (batchBusy || String(id).indexOf("tmp-") === 0) return
+    if (selectedIds.indexOf(id) >= 0) selectedIds = selectedIds.filter(function(x) { return x !== id })
+    else if (selectedIds.length < 100) selectedIds = selectedIds.concat([id])
+    else toolsMessage = "Select up to 100 cards at a time."
+  }
+  function selectVisible() {
+    selectionMode = true
+    var ids = []
+    for (var c = 0; c < board.columns.length; c++)
+      for (var i = 0; i < board.columns[c].cards.length && ids.length < 100; i++) {
+        var card = board.columns[c].cards[i]
+        if (matchesCard(card) && String(card.id).indexOf("tmp-") !== 0) ids.push(card.id)
+      }
+    selectedIds = ids
+  }
+  function cancelSelection() { selectionMode = false; selectedIds = [] }
+
+  // Snapshots of existing cards, stored locally without attachments or dates.
+  property var cardTemplates: []
+  property bool templatesLoaded: false
+  FileView {
+    id: templateFile
+    path: root.dirsReady ? root.dataDir + "/templates.json" : ""
+    watchChanges: true
+    atomicWrites: true
+    onLoaded: {
+      try { root.cardTemplates = Tools.templates(JSON.parse(text())) } catch (e) { root.cardTemplates = [] }
+      root.templatesLoaded = true
+    }
+    onLoadFailed: root.templatesLoaded = true
+    onFileChanged: reload()
+  }
+  function saveTemplate(id, name) {
+    var hit = findCard(id)
+    name = String(name || "").trim().slice(0, 80)
+    if (!hit || !name || !templatesLoaded || String(id).indexOf("tmp-") === 0) return false
+    if (cardTemplates.length >= 50) { toolsMessage = "Remove a template before saving another (limit 50)."; return false }
+    var more = cardDetails(hit.card)
+    if (JSON.stringify(more.raw || []).length > 60000) { toolsMessage = "This checklist is too large to save as a template."; return false }
+    cardTemplates = Tools.templates(cardTemplates.concat([{ id: uid(), name: name, boardId: curBoardId, title: hit.card.text,
+      desc: more.desc, checklists: more.raw, labelIds: more.labelIds, memberIds: more.memberIds }]))
+    templateFile.setText(JSON.stringify(cardTemplates, null, 2) + "\n")
+    toolsMessage = "Template saved."
+    return true
+  }
+  function removeTemplate(id) {
+    if (!templatesLoaded) return
+    cardTemplates = cardTemplates.filter(function(x) { return x.id !== id })
+    templateFile.setText(JSON.stringify(cardTemplates, null, 2) + "\n")
+  }
+  function createFromTemplate(id, col) {
+    var template = cardTemplates.filter(function(x) { return x.id === id })[0]
+    var column = board.columns[col]
+    if (!template || !column || batchBusy || writesInFlight || fetching || !loaded || !quickUsable(col)) return
+    var patch = Tools.templatePatch(template, Object.keys(labelMap), Object.keys(memberMap), hexId)
+    if (JSON.stringify(patch.checklists).length > 60000) { toolsMessage = "This template's checklist is too large."; return }
+    if (!synced) {
+      var next = cloneBoard()
+      next.columns[col].cards.push({ id: uid(), text: template.title || template.name, desc: patch.desc, checklists: patch.checklists, dueComplete: false, hasDesc: !!patch.desc.trim() })
+      commitLocal(sanitizeLocal(next))
+      toolsMessage = "Card created from template."
+      return
+    }
+    batchBusy = true
+    writesInFlight++
+    toolsMessage = "Creating card…"
+    var boardId = curBoardId
+    api("POST", "/api/v1/boards/" + encodeURIComponent(boardId) + "/cards", { idList: column.listId, name: template.title || template.name, pos: newPos(column.cards, column.cards.length) }, function(ok, card, err) {
+      if (!ok || !card || Tools.ids([card.id]).length !== 1) { root.finishToolWrite("Could not confirm card creation: " + (err || "bad response")); return }
+      root.api("PATCH", "/api/v1/cards/" + encodeURIComponent(card.id), patch, function(updated, data, patchError) {
+        root.finishToolWrite(updated ? "Card created from template." : "Card created, but template details failed: " + patchError)
+      })
+    })
+  }
+  function finishToolWrite(message) {
+    writesInFlight = Math.max(0, writesInFlight - 1)
+    batchBusy = false
+    toolsMessage = message
+    refetchAfterWrites = false
+    if (synced) fetchBoard(true)
+  }
+
+  function bulkAction(action, value) {
+    if (batchBusy || writesInFlight || fetching || !selectedIds.length) return
+    if (["complete", "incomplete", "move", "label", "member", "archive"].indexOf(action) < 0) return
+    if (action === "move" && !board.columns.some(function(c, i) { return String(i) === String(value) && (!root.synced || !!c.listId) })) return
+    if (action === "label" && (!synced || !labelMap[value])) return
+    if (action === "member" && (!synced || !memberMap[value])) return
+    var jobs = selectedIds.slice(0, 100).map(function(id) {
+      var hit = root.findCard(id)
+      if (!hit) return null
+      var more = root.cardDetails(hit.card), patch = {}
+      if (action === "complete" || action === "incomplete") patch.dueComplete = action === "complete"
+      else if (action === "archive") patch.closed = true
+      else if (action === "move") { patch.idList = root.board.columns[Number(value)].listId; patch.pos = root.newPos(root.board.columns[Number(value)].cards, root.board.columns[Number(value)].cards.length) }
+      else if (action === "label") patch.idLabels = Tools.addId(more.labelIds, value)
+      else if (action === "member") patch.idMembers = Tools.addId(more.memberIds, value)
+      return { id: id, patch: patch }
+    }).filter(function(job) { return job !== null })
+    if (!jobs.length) return
+    if (!synced) {
+      if (["label", "member", "archive"].indexOf(action) >= 0) return
+      var next = cloneBoard()
+      jobs.forEach(function(job) {
+        var hit = root.findCard(job.id)
+        var card = next.columns[hit.col].cards.filter(function(x) { return x.id === job.id })[0]
+        if (action === "move") {
+          next.columns[hit.col].cards = next.columns[hit.col].cards.filter(function(x) { return x.id !== job.id })
+          next.columns[Number(value)].cards.push(card)
+        } else card.dueComplete = job.patch.dueComplete
+      })
+      commitLocal(next)
+      selectedIds = []
+      toolsMessage = jobs.length + " cards updated."
+      return
+    }
+    batchBusy = true
+    writesInFlight++
+    var at = 0, succeeded = 0, failed = [], error = ""
+    var forBoard = curBoardId
+    function nextJob() {
+      if (at >= jobs.length || root.curBoardId !== forBoard) {
+        root.selectedIds = failed
+        root.finishToolWrite(succeeded + " updated" + (failed.length ? "; " + failed.length + " failed: " + error : "."))
+        return
+      }
+      var job = jobs[at++]
+      // Preserve selection order when moving a batch to the end of a list.
+      if (action === "move") job.patch.pos += at * 65536
+      root.toolsMessage = "Updating " + at + " of " + jobs.length + "…"
+      root.api("PATCH", "/api/v1/cards/" + encodeURIComponent(job.id), job.patch, function(ok, data, err, status) {
+        if (ok) succeeded++
+        else {
+          failed.push(job.id); error = err || "request failed"
+          if (status === 429 || status === 401) {
+            failed = failed.concat(jobs.slice(at).map(function(pending) { return pending.id }))
+            at = jobs.length
+          }
+        }
+        Qt.callLater(nextJob)
+      })
+    }
+    nextJob()
+  }
 
   // ---------------------------------------------------------------- config
   property var cfg: null              // validated config, or null for local mode
@@ -104,46 +303,13 @@ Item {
   property var pending: []            // in-flight XHRs for the timeout watchdog
   property real now: Date.now()
 
-  function validConfig(c) {
-    if (!c || typeof c !== "object") return null
-    var url = String(c.apiUrl || "https://boardhydra.com").replace(/\/+$/, "")
-    if (!/^https:\/\/[A-Za-z0-9.-]+(:\d+)?$/.test(url) && !/^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/.test(url)) {
-      console.warn("boardhydra.desk: apiUrl must be https://host"); return null
-    }
-    var key = String(c.apiKey || "")
-    if (!/^bh_live_[A-Za-z0-9_-]{8,200}$/.test(key)) { console.warn("boardhydra.desk: missing or malformed apiKey"); return null }
-    var boardId = String(c.boardId || "")
-    if (!/^[A-Za-z0-9_-]{1,64}$/.test(boardId)) { console.warn("boardhydra.desk: missing boardId"); return null }
-    var lists = Array.isArray(c.lists) ? c.lists.slice(0, 4).map(function(n) { return String(n).slice(0, 100) }) : []
-    var mins = Number(c.refreshMinutes)
-    if (!(mins >= 2 && mins <= 1440)) mins = 10
-    return { apiUrl: url, apiKey: key, boardId: boardId, lists: lists, refreshMinutes: mins, live: c.live !== false }
-  }
-
-  FileView {
-    id: configFile
-    path: root.configPath
-    watchChanges: true
-    onLoaded: {
-      var c = null
-      try { c = root.validConfig(JSON.parse(text())) } catch (e) { console.warn("boardhydra.desk: config is not valid JSON") }
-      root.baseCfg = c
-      root.baseLoaded = true
-      root.applyCfg()
-    }
-    onLoadFailed: function(error) {
-      root.baseCfg = null
-      root.baseLoaded = true
-      root.applyCfg()
-    }
-    onFileChanged: reload()
-  }
-
   // The board picked from the desktop's own switcher. Kept apart from
   // config.json so the file holding the API key is never rewritten.
-  readonly property string statePath: dirsReady ? home + "/.config/boardhydra-desk/workspace-" + workspaceId + ".json" : ""
-  property var baseCfg: null
-  property bool baseLoaded: false
+  readonly property string statePath: dirsReady ? home + "/.config/boardhydra-desk/state.json" : ""
+  readonly property var baseCfg: sharedEnvironment.baseCfg
+  readonly property bool baseLoaded: sharedEnvironment.baseLoaded
+  onBaseCfgChanged: applyCfg()
+  onBaseLoadedChanged: applyCfg()
   property bool stateLoaded: false
   property string pickedBoard: ""
   property var pickedLists: ({})      // board id -> [list id or "", one per slot]
@@ -162,7 +328,7 @@ Item {
   }
 
   function saveState() {
-    stateFile.setText(JSON.stringify({ boardId: pickedBoard, lists: pickedLists, layout: layout }, null, 2) + "\n")
+    stateFile.setText(JSON.stringify({ boardId: pickedBoard, lists: pickedLists, layout: layout, appearance: appearance }, null, 2) + "\n")
   }
 
   // ------------------------------------------------------------- list picker
@@ -173,6 +339,7 @@ Item {
 
   // Show listId in slot col; "" leaves the slot empty.
   function pickList(col, listId) {
+    if (batchBusy || writesInFlight) return
     listMenuCol = -1
     if (!synced || col < 0 || col >= slots) return
     var cur = []
@@ -198,12 +365,15 @@ Item {
     onLoaded: {
       var id = ""
       var picks = ({})
+      var look = Appearance.validate(null)
       try {
         var st = JSON.parse(text())
         id = String(st.boardId || "")
         picks = root.validPicks(st.lists)
+        look = Appearance.validate(st.appearance)
       } catch (e) {}
       var picksChanged = JSON.stringify(picks) !== JSON.stringify(root.pickedLists)
+      root.appearance = look
       root.pickedLists = picks
       try { root.layout = JSON.parse(text()).layout === "center" ? "center" : "gaps" } catch (e2) {}
       root.pickedBoard = /^[A-Za-z0-9_-]{1,64}$/.test(id) ? id : ""
@@ -215,6 +385,7 @@ Item {
       if (!first && picksChanged && root.synced && JSON.stringify(root.cfg) === before) root.fetchBoard(true)
     }
     onLoadFailed: function(error) {
+      root.appearance = Appearance.validate(null)
       root.pickedBoard = ""
       root.stateLoaded = true
       root.applyCfg()
@@ -247,6 +418,8 @@ Item {
   property bool switcherOpen: false
 
   function openSwitcher() {
+    appearanceOpen = false
+    toolsOpen = false
     switcherOpen = !switcherOpen
     if (!switcherOpen || !synced) return
     if (boardListState === "loading" || (boardListState === "ok" && Date.now() - boardListAt < 120000)) return
@@ -267,6 +440,7 @@ Item {
 
   // Leaves the panel open so the new board's lists can be picked straight away.
   function switchBoard(id) {
+    if (batchBusy || writesInFlight) return
     if (!synced || id === cfg.boardId) return
     openCardId = ""
     lastArchived = null
@@ -288,6 +462,9 @@ Item {
   }
 
   function modeChanged() {
+    cancelSelection()
+    resetFilters()
+    toolsOpen = false
     if (synced) {
       board = { columns: [] }
       loaded = false
@@ -326,7 +503,13 @@ Item {
       var list = Array.isArray(src.cards) ? src.cards : []
       for (var i = 0; i < list.length && cards.length < 200; i++) {
         var t = list[i] && typeof list[i].text === "string" ? list[i].text.slice(0, 500) : ""
-        if (t.trim().length) cards.push({ id: String(list[i].id || uid()).slice(0, 40), text: t })
+        if (t.trim().length) {
+          var raw = Tools.checklists(list[i].checklists, null, true), acc = { done: 0, total: 0 }
+          raw.forEach(function(cl) { root.countChecks(cl.checkItems, acc) })
+          var desc = Tools.bounded(list[i].desc, 20000)
+          cards.push({ id: String(list[i].id || uid()).slice(0, 40), text: t, dueComplete: list[i].dueComplete === true,
+            desc: desc, checklists: raw, hasDesc: !!desc.trim(), checkDone: acc.done, checkTotal: acc.total })
+        }
       }
       out.columns.push({ title: title, cards: cards })
     }
@@ -339,9 +522,18 @@ Item {
     command: ["sh", "-c",
       Storage.prepare +
       'if [ -f "$3" ] && [ ! -e "$1/board.json" ]; then mv -n "$3" "$1/board.json"; fi; ' +
-      'if [ -f "$4/state.json" ] && [ ! -e "$4/workspace-$5.json" ]; then cp -n "$4/state.json" "$4/workspace-$5.json"; fi; ' +
-      'if [ "$5" = 1 ] && [ -f "$1/board.json" ] && [ ! -e "$1/workspace-1.json" ]; then cp -n "$1/board.json" "$1/workspace-1.json"; fi; exit 0',
-      "sh", root.dataDir, root.cacheDir, root.oldDataPath, root.home + "/.config/boardhydra-desk", String(root.workspaceId)]
+      'private_file "$1/.shared-board-v1" || exit 1; ' +
+      'if [ ! -e "$1/.shared-board-v1" ]; then ' +
+      'ws="$5"; [ -f "$4/workspace-$ws.json" ] || ws=1; ' +
+      'if [ -f "$4/workspace-$ws.json" ]; then ' +
+      '[ ! -f "$4/state.json" ] || cp -n "$4/state.json" "$4/state-before-shared.json" || exit 1; ' +
+      'cp "$4/workspace-$ws.json" "$4/state.json" || exit 1; fi; ' +
+      'ws="$5"; [ -f "$1/workspace-$ws.json" ] || ws=1; ' +
+      'if [ -f "$1/workspace-$ws.json" ]; then ' +
+      '[ ! -f "$1/board.json" ] || cp -n "$1/board.json" "$1/board-before-shared.json" || exit 1; ' +
+      'cp "$1/workspace-$ws.json" "$1/board.json" || exit 1; fi; ' +
+      'touch "$1/.shared-board-v1" || exit 1; fi; exit 0',
+      "sh", root.dataDir, root.cacheDir, root.oldDataPath, root.home + "/.config/boardhydra-desk", String(root.migrationWorkspace)]
     onExited: function(code, status) {
       if (code !== 0) console.warn("boardhydra.desk: unsafe storage path or private folder initialization failed")
       if (code === 0) root.dirsReady = true
@@ -516,8 +708,8 @@ Item {
 
   function mutateChecks(id, fn) {
     var hit = findCard(id)
-    var more = detailMap[id]
-    if (!hit || !more || !synced || String(id).indexOf("tmp-") === 0) return
+    var more = hit ? cardDetails(hit.card) : null
+    if (!hit || !more || String(id).indexOf("tmp-") === 0) return
     var raw = JSON.parse(JSON.stringify(Array.isArray(more.raw) ? more.raw : []))
     if (fn(raw) === false) return
     if (JSON.stringify(raw).length > 60000) { setError("checklist is too large to edit here"); return }
@@ -529,6 +721,7 @@ Item {
     var b = cloneBoard()
     b.columns[hit.col].cards[hit.idx].checkDone = acc.done
     b.columns[hit.col].cards[hit.idx].checkTotal = acc.total
+    if (!synced) { b.columns[hit.col].cards[hit.idx].checklists = raw; commitLocal(b); return }
     board = b
     write("PATCH", "/api/v1/cards/" + encodeURIComponent(id), { checklists: raw })
   }
@@ -863,14 +1056,15 @@ Item {
 
   function saveDesc(id, text) {
     var hit = findCard(id)
-    if (!hit || !synced || String(id).indexOf("tmp-") === 0) return
+    if (!hit || String(id).indexOf("tmp-") === 0) return
     text = String(text || "").replace(/\s+$/, "").slice(0, 20000)   // the server keeps 20,000 characters
-    var more = detailMap[id] || { desc: "", checklists: [], members: [] }
+    var more = cardDetails(hit.card)
     if (text === more.desc) return
     detailMap[id] = { desc: text, members: more.members, memberIds: more.memberIds, labelIds: more.labelIds, raw: more.raw, checklists: more.checklists }
     detailRev += 1
     var b = cloneBoard()
     b.columns[hit.col].cards[hit.idx].hasDesc = text.trim().length > 0
+    if (!synced) { b.columns[hit.col].cards[hit.idx].desc = text; commitLocal(b); return }
     board = b
     write("PATCH", "/api/v1/cards/" + encodeURIComponent(id), { desc: text })
   }
@@ -983,13 +1177,29 @@ Item {
     write("PATCH", "/api/v1/cards/" + encodeURIComponent(id), { due: null, dueComplete: false })
   }
 
-  function toggleDue(col, idx) {
+  // Card completion uses the same API flag as the web app, even without a date.
+  function toggleComplete(id) {
+    if (batchBusy) return
+    var hit = findCard(id)
+    if (!hit || String(id).indexOf("tmp-") === 0 || (synced && writesInFlight > 0)) return
     var b = cloneBoard()
-    var card = b.columns[col].cards[idx]
-    if (!card || !card.due || !synced || String(card.id).indexOf("tmp-") === 0) return
+    var card = b.columns[hit.col].cards[hit.idx]
     card.dueComplete = !card.dueComplete
+    if (!synced) { commitLocal(b); return }
     board = b
-    write("PATCH", "/api/v1/cards/" + encodeURIComponent(card.id), { dueComplete: card.dueComplete })
+    // Completion can run website automations that move or archive the card.
+    refetchAfterWrites = true
+    write("PATCH", "/api/v1/cards/" + encodeURIComponent(id), { dueComplete: card.dueComplete })
+  }
+
+  function toggleDue(col, idx) {
+    var column = board.columns[col]
+    var card = column && column.cards[idx]
+    if (card) toggleComplete(card.id)
+  }
+
+  function openAutomations() {
+    if (synced) Quickshell.execDetached(["xdg-open", cfg.apiUrl + "/app/automation"])
   }
 
   function boardFromSnapshot(snap) {
@@ -1064,6 +1274,7 @@ Item {
   }
 
   function write(method, path, body, onOk) {
+    if (batchBusy) return
     writesInFlight += 1
     syncState = "syncing"
     api(method, path, body, function(ok, data, err) {
@@ -1094,6 +1305,7 @@ Item {
 
   // ------------------------------------------------------- board operations
   function addCard(col, text) {
+    if (batchBusy) return
     text = String(text || "").trim().slice(0, 500)
     if (!text) return
     var b = cloneBoard()
@@ -1214,7 +1426,7 @@ Item {
   property real streamUp: 0           // when the current connection came up
   property int streamFails: 0
   property bool everLive: false
-  readonly property bool wantStream: synced && cfg.live && onBoardWallpaper && workspaceScreens.length > 0
+  readonly property bool wantStream: synced && cfg.live && onBoardWallpaper && boardScreens.length > 0
 
   onWantStreamChanged: wantStream ? startStream() : stopStream()
   // A different board or key: reconnect as soon as the old connection is gone.
@@ -1362,7 +1574,7 @@ Item {
     // With the stream up this is only a safety net.
     interval: root.live ? 3600000 : (root.synced ? root.cfg.refreshMinutes * 60000 : 600000)
     repeat: true
-    running: root.synced && root.onBoardWallpaper && root.workspaceScreens.length > 0
+    running: root.synced && root.onBoardWallpaper && root.boardScreens.length > 0
     onTriggered: root.fetchBoard(true)
   }
 
@@ -1372,24 +1584,6 @@ Item {
     var m = Math.round(s / 60)
     if (m < 60) return m + "m ago"
     return Math.round(m / 60) + "h ago"
-  }
-
-  // ------------------------------------------- show only on the board wallpaper
-  Process {
-    id: bgProbe
-    command: ["sh", "-c", "cat \"$HOME/.local/state/omarchy/current/theme.name\" 2>/dev/null; echo; readlink -f \"$HOME/.local/state/omarchy/current/background\""]
-    stdout: StdioCollector {
-      onStreamFinished: {
-        var lines = text.split("\n").map(function(l) { return l.trim() }).filter(function(l) { return l.length })
-        var theme = lines.length > 1 ? lines[0] : ""
-        var bg = lines.length ? lines[lines.length - 1] : ""
-        root.onBoardWallpaper = theme === "boardhydra" && /\/2-board\.[a-z]+$/.test(bg)
-      }
-    }
-  }
-  Timer {
-    interval: 2000; repeat: true; running: true; triggeredOnStart: true
-    onTriggered: if (!bgProbe.running) bgProbe.running = true
   }
 
   // ------------------------------------------------------------ quick add
@@ -1410,6 +1604,7 @@ Item {
     }
   }
   function openQuickAdd() {
+    if (batchBusy) return
     if (quickOpen) { quickOpen = false; return }
     if (synced) fetchBoard(false)
     if (!quickUsable(quickCol)) quickCycle(1)
@@ -1420,7 +1615,7 @@ Item {
     active: root.quickOpen
     PanelWindow {
       id: quick
-      screen: root.workspaceScreens.length ? root.workspaceScreens[0] : null
+      screen: root.boardScreens.find(function(screen) { return Hyprland.monitorFor(screen) === Hyprland.focusedMonitor }) || root.boardScreens[0] || null
       visible: true
       implicitWidth: 560
       implicitHeight: 132
@@ -1577,6 +1772,23 @@ Item {
     }
   }
 
+  component ToolButton: Rectangle {
+    id: toolButton
+    property string text: ""
+    property bool active: false
+    signal clicked()
+    width: toolCaption.implicitWidth + 22; height: 28; radius: 9
+    color: active || toolHover.hovered ? Qt.alpha(root.heads[1], 0.24) : "#1b1729"
+    border.width: 1; border.color: active ? root.heads[1] : root.cardBorder
+    opacity: enabled ? 1 : 0.45
+    Plain { id: toolCaption; anchors.centerIn: parent; text: toolButton.text; font.pixelSize: 11 }
+    HoverHandler { id: toolHover; cursorShape: Qt.PointingHandCursor }
+    TapHandler { onTapped: toolButton.clicked() }
+    Accessible.role: Accessible.Button
+    Accessible.name: text
+    Accessible.onPressAction: clicked()
+  }
+
   component Plain: Text {
     textFormat: Text.PlainText
     font.family: Style.fontFamily
@@ -1584,7 +1796,7 @@ Item {
   }
 
   Variants {
-    model: root.workspaceScreens
+    model: root.boardScreens
 
     PanelWindow {
       id: win
@@ -1602,7 +1814,7 @@ Item {
       readonly property real cw: root.colW * s
 
       anchors { top: true; left: true }
-      readonly property int barH: root.synced ? 44 : 0
+      readonly property int barH: 82
       margins { left: Math.round(ox + root.colX * s); top: Math.round(oy + root.colY * s) - barH }
       implicitWidth: Math.round(stride * (root.slots - 1) + cw)
       implicitHeight: Math.round(root.colH * s) + barH
@@ -1635,7 +1847,7 @@ Item {
         var idx = rep.count
         for (var i = 0; i < rep.count; i++) {
           var it = rep.itemAt(i)
-          if (!it) continue
+          if (!it || !it.visible) continue
           var p = it.mapToItem(boardArea, 0, 0)
           if (y < p.y + it.height / 2) { idx = i; break }
         }
@@ -1660,13 +1872,13 @@ Item {
       // Top bar: the board name opens the board & lists menu; a way to the full site.
       Item {
         id: topBar
-        visible: root.synced
         width: parent.width
         height: win.barH
         z: 30
 
         Rectangle {
           id: boardPill
+          visible: root.synced
           height: 30; radius: 15
           width: Math.min(parent.width * 0.6, pillRow.implicitWidth + 28)
           color: pillHover.hovered || root.switcherOpen ? "#241f35" : "#1b1729"
@@ -1694,6 +1906,21 @@ Item {
         }
 
         Rectangle {
+          id: stylePill
+          anchors { right: root.synced ? sitePill.left : parent.right; rightMargin: root.synced ? 8 : 0 }
+          height: 30; radius: 15
+          width: styleText.implicitWidth + 28
+          color: styleHover.hovered || root.appearanceOpen ? "#241f35" : "#1b1729"
+          border.width: 1
+          border.color: root.appearanceOpen ? root.surfaceTone : root.cardBorder
+          Plain { id: styleText; anchors.centerIn: parent; font.pixelSize: 12; text: "Style  \uf1de" }
+          HoverHandler { id: styleHover; cursorShape: Qt.PointingHandCursor }
+          TapHandler { onTapped: { root.appearanceOpen = !root.appearanceOpen; root.toolsOpen = false; root.switcherOpen = false; root.listMenuCol = -1 } }
+        }
+
+        Rectangle {
+          id: sitePill
+          visible: root.synced
           anchors.right: parent.right
           height: 30; radius: 15
           width: siteText.implicitWidth + 28
@@ -1704,6 +1931,63 @@ Item {
           HoverHandler { id: siteHover; cursorShape: Qt.PointingHandCursor }
           TapHandler { onTapped: root.openFullSite() }
         }
+      }
+
+      Item {
+        y: 38; width: parent.width; height: 30; z: 30
+        Rectangle {
+          id: searchBox
+          width: Math.min(360, parent.width * 0.34); height: 28; radius: 9
+          color: "#1b1729"; border.width: 1; border.color: searchInput.activeFocus ? root.heads[1] : root.cardBorder
+          TextInput {
+            id: searchInput
+            anchors { fill: parent; leftMargin: 10; rightMargin: 10 }
+            verticalAlignment: TextInput.AlignVCenter
+            font.family: Style.fontFamily; font.pixelSize: 12
+            color: root.textColor; selectByMouse: true; clip: true; maximumLength: 200
+            text: root.filters.query
+            onTextEdited: root.setFilter("query", text)
+            Keys.onEscapePressed: { root.resetFilters(); focus = false }
+            Plain { visible: searchInput.text.length === 0; anchors.verticalCenter: parent.verticalCenter; font.pixelSize: 12; color: root.faintColor; text: "Search cards…" }
+          }
+        }
+        Row {
+          anchors { left: searchBox.right; leftMargin: 8 }
+          spacing: 6
+          ToolButton { text: "Filters"; active: root.filtersActive; onClicked: root.showTools("filters") }
+          ToolButton {
+            text: root.selectionMode ? root.selectedIds.length + " selected" : "Select"
+            active: root.selectionMode
+            onClicked: {
+              if (root.selectionMode) root.showTools("bulk")
+              else { root.selectionMode = true; root.toolsOpen = false; root.openCardId = "" }
+            }
+          }
+          ToolButton { visible: root.selectionMode; text: "Cancel"; enabled: !root.batchBusy; onClicked: root.cancelSelection() }
+          ToolButton { text: "Templates"; onClicked: root.showTools("templates") }
+          ToolButton { visible: root.filtersActive; text: "Clear"; onClicked: root.resetFilters() }
+        }
+      }
+
+      // Keep the board and toolbar still while a batch is running.
+      MouseArea {
+        anchors.fill: parent
+        z: 44
+        visible: root.batchBusy
+        acceptedButtons: Qt.AllButtons
+        onWheel: function(event) { event.accepted = true }
+      }
+
+      BoardToolsPanel {
+        anchors.fill: parent
+        desk: root
+        z: 46
+      }
+
+      AppearancePicker {
+        anchors.fill: parent
+        desk: root
+        z: 45
       }
 
       // Board & lists panel: pick the board, then which list fills each column.
@@ -1972,8 +2256,39 @@ Item {
             border.width: 1
             border.color: Qt.alpha(head, win.hoverCol === index && win.dragCol >= 0 ? 0.9 : 0.4)
             gradient: Gradient {
-              GradientStop { position: 0; color: Qt.tint("#15121f", Qt.alpha(column.head, 0.06)) }
-              GradientStop { position: 1; color: Qt.tint("#100e18", Qt.alpha(column.head, 0.04)) }
+              GradientStop { position: 0; color: Qt.tint("#15121f", Qt.alpha(column.head, root.appearance.preset === "classic" ? 0.06 : 0.18)) }
+              GradientStop { position: 1; color: Qt.tint("#100e18", Qt.alpha(column.head, root.appearance.preset === "classic" ? 0.04 : 0.08)) }
+            }
+
+            // A single wash per list, behind all content. Inset clipping keeps
+            // the band inside the rounded list corners without a shader layer.
+            Item {
+              anchors { fill: parent; margins: column.radius }
+              clip: true
+              visible: root.appearance.preset === "holo"
+              Rectangle {
+                id: holoWash
+                property real travel: 0.5
+                width: parent.width * 2 + height * 0.5
+                height: parent.height * 0.65
+                x: (parent.width - width) / 2 + (travel - 0.5) * parent.width * 0.5
+                y: travel * parent.height - height / 2
+                rotation: -20
+                opacity: 0.18
+                gradient: Gradient {
+                  GradientStop { position: 0; color: "transparent" }
+                  GradientStop { position: 0.3; color: "#5ee0ff" }
+                  GradientStop { position: 0.5; color: "#c86eff" }
+                  GradientStop { position: 0.7; color: "#ff6fb5" }
+                  GradientStop { position: 1; color: "transparent" }
+                }
+                SequentialAnimation on travel {
+                  loops: Animation.Infinite
+                  running: root.appearance.preset === "holo" && root.appearance.motion && !Style.reduceMotion && win.visible
+                  NumberAnimation { from: 0; to: 1; duration: Style.duration(6500); easing.type: Easing.InOutSine }
+                  NumberAnimation { from: 1; to: 0; duration: Style.duration(6500); easing.type: Easing.InOutSine }
+                }
+              }
             }
 
             // Header
@@ -1988,7 +2303,7 @@ Item {
                 width: Math.min(implicitWidth, column.width - 104)
                 color: titleHover.hovered && root.synced ? column.head : root.textColor
               }
-              Plain { text: column.modelData.cards.length; font.pixelSize: 13; color: root.faintColor; anchors.verticalCenter: parent.verticalCenter }
+              Plain { text: root.filtersActive ? root.visibleCount(column.modelData.cards) + "/" + column.modelData.cards.length : column.modelData.cards.length; font.pixelSize: 13; color: root.faintColor; anchors.verticalCenter: parent.verticalCenter }
               Plain {
                 visible: root.synced
                 anchors.verticalCenter: parent.verticalCenter
@@ -2053,7 +2368,8 @@ Item {
                     required property var modelData
                     required property int index
                     width: list.width
-                    height: card.height
+                    visible: root.matchesCard(modelData)
+                    height: visible ? card.height : 0
 
                     // Drop indicator above this card
                     Rectangle {
@@ -2078,9 +2394,9 @@ Item {
                       width: parent.width
                       height: Math.max(hasFooter ? 0 : 56, textY + (editing ? editor.contentHeight : label.contentHeight) + (hasFooter ? 38 : 12))
                       radius: 12
-                      color: hover.hovered || editing ? root.cardHover : root.cardColor
-                      border.width: 1
-                      border.color: editing ? column.head : root.cardBorder
+                      color: hover.hovered || editing ? (root.appearance.preset === "classic" && !root.appearance.tint ? root.cardHover : Qt.lighter(root.surfaceCard, 1.18)) : root.surfaceCard
+                      border.width: root.selectedIds.indexOf(card.d.id) >= 0 ? 2 : 1
+                      border.color: root.selectedIds.indexOf(card.d.id) >= 0 ? "#5be38c" : editing ? column.head : (root.appearance.preset === "classic" ? root.cardBorder : Qt.alpha(column.head, 0.45))
                       opacity: beingDragged ? 0.35 : (unsaved ? 0.7 : 1)
 
                       Rectangle { visible: !root.synced; x: 14; y: 12; width: 40; height: 4; radius: 2; color: column.head }
@@ -2097,9 +2413,10 @@ Item {
                         id: label
                         visible: !card.editing
                         x: 14; y: card.textY
-                        width: parent.width - 28 - (hover.hovered ? 18 : 0)
+                        width: parent.width - 62
                         wrapMode: Text.Wrap
                         font.pixelSize: 13
+                        color: root.surfaceInk
                         text: cardSlot.modelData.text
                       }
 
@@ -2107,12 +2424,12 @@ Item {
                         id: editor
                         visible: card.editing
                         x: 14; y: card.textY
-                        width: parent.width - 28
+                        width: parent.width - 62
                         wrapMode: TextEdit.Wrap
                         textFormat: TextEdit.PlainText
                         font.family: Style.fontFamily
                         font.pixelSize: 13
-                        color: root.textColor
+                        color: root.surfaceInk
                         selectionColor: Qt.alpha(column.head, 0.5)
                         selectByMouse: true
                         Keys.onPressed: function(e) {
@@ -2135,16 +2452,16 @@ Item {
 
                       MouseArea {
                         anchors.fill: parent
-                        enabled: !card.editing && !card.unsaved
+                        enabled: !card.editing && !card.unsaved && !root.batchBusy
                         cursorShape: win.dragCol >= 0 ? Qt.ClosedHandCursor : Qt.OpenHandCursor
                         property point press
                         property bool moved: false
                         onPressed: function(m) { press = Qt.point(m.x, m.y); moved = false }
-                        onClicked: if (!moved && root.synced) openTimer.restart()
+                        onClicked: if (!moved) { if (root.selectionMode) root.toggleSelection(card.d.id); else openTimer.restart() }
                         // Wait out a possible double-click (which edits the title instead).
                         Timer { id: openTimer; interval: 260; onTriggered: if (!card.editing) root.openCardId = cardSlot.modelData.id }
                         onPositionChanged: function(m) {
-                          if (!pressed) return
+                          if (!pressed || root.selectionMode) return
                           var p = mapToItem(boardArea, m.x, m.y)
                           if (win.dragCol < 0) {
                             if (Math.abs(m.x - press.x) + Math.abs(m.y - press.y) < 6) return
@@ -2167,6 +2484,7 @@ Item {
                           root.moveCard(fc, fi, t.col, t.idx)
                         }
                         onDoubleClicked: {
+                          if (root.selectionMode) return
                           openTimer.stop()
                           editor.text = cardSlot.modelData.text
                           card.editing = true
@@ -2241,11 +2559,31 @@ Item {
                         }
                       }
 
+                      // Always visible; independent of due dates and card opening.
+                      Rectangle {
+                        objectName: "cardComplete-" + card.d.id
+                        width: 24; height: 24; radius: 12
+                        anchors { right: parent.right; top: parent.top; margins: 8 }
+                        readonly property bool done: root.selectionMode ? root.selectedIds.indexOf(card.d.id) >= 0 : !!card.d.dueComplete
+                        enabled: !root.batchBusy && !card.editing && !card.unsaved && win.dragCol < 0 && (!root.synced || root.writesInFlight === 0)
+                        color: done ? "#5be38c" : (completeHover.hovered ? Qt.alpha(column.head, 0.25) : Qt.alpha(root.surfaceInk, 0.08))
+                        border.width: 1
+                        border.color: done ? "#5be38c" : Qt.alpha(root.surfaceInk, 0.4)
+                        Plain { anchors.centerIn: parent; text: "\uf00c"; font.pixelSize: 12; color: parent.done ? "#102218" : root.surfaceInk }
+                        Accessible.role: Accessible.CheckBox
+                        Accessible.name: root.selectionMode ? (done ? "Deselect card" : "Select card") : done ? "Mark card incomplete" : "Mark card complete"
+                        Accessible.checkable: true
+                        Accessible.checked: done
+                        Accessible.onPressAction: root.selectionMode ? root.toggleSelection(card.d.id) : root.toggleComplete(card.d.id)
+                        HoverHandler { id: completeHover; cursorShape: Qt.PointingHandCursor }
+                        MouseArea { anchors.fill: parent; onClicked: root.selectionMode ? root.toggleSelection(card.d.id) : root.toggleComplete(card.d.id); onDoubleClicked: {} }
+                      }
+
                       // Delete (archive, in synced mode) button
                       Rectangle {
-                        visible: hover.hovered && !card.editing && !card.unsaved && win.dragCol < 0
+                        visible: !root.selectionMode && !root.batchBusy && hover.hovered && !card.editing && !card.unsaved && win.dragCol < 0
                         width: 22; height: 22; radius: 11
-                        anchors { right: parent.right; top: parent.top; margins: 7 }
+                        anchors { right: parent.right; bottom: parent.bottom; margins: 7 }
                         color: delHover.hovered ? "#3a1d2a" : "transparent"
                         Plain { anchors.centerIn: parent; text: "×"; font.pixelSize: 16; color: delHover.hovered ? root.badColor : root.mutedColor }
                         HoverHandler { id: delHover; cursorShape: Qt.PointingHandCursor }
@@ -2425,11 +2763,13 @@ Item {
           z: 10
           readonly property var hit: root.findCard(root.openCardId)
           readonly property var card: hit ? hit.card : null
-          readonly property var more: { root.detailRev; return (card && root.detailMap[card.id]) || { desc: "", checklists: [], members: [] } }
+          readonly property var more: { root.detailRev; return root.cardDetails(card) }
           readonly property color head: hit ? root.heads[hit.col] : root.heads[1]
           visible: card !== null
           // The card was archived, deleted or moved off the desktop while open.
-          onHitChanged: if (!hit && root.openCardId) root.openCardId = ""
+          onHitChanged: if (!hit && root.openCardId) Qt.callLater(function() {
+            if (root.openCardId && !root.findCard(root.openCardId)) root.openCardId = ""
+          })
           property bool descEditing: false
           property bool dueOpen: false
           property var pickMonth: new Date()   // first day of the month the calendar shows
@@ -2479,7 +2819,7 @@ Item {
           property string ckEdit: ""       // "ci:ii:ki" of the item being renamed
           property string ckSubFor: ""     // "ci:ii:-1" of the item getting a sub-item
           readonly property string openId: root.openCardId
-          onOpenIdChanged: { descEditing = false; ckEdit = ""; ckSubFor = ""; dueOpen = false; membersOpen = false; labelsOpen = false; attConfirm = ""; showArchived = false; root.attNote = ""; if (openId) root.refreshAttachments(openId) }
+          onOpenIdChanged: { descEditing = false; ckEdit = ""; ckSubFor = ""; dueOpen = false; membersOpen = false; labelsOpen = false; attConfirm = ""; showArchived = false; root.attNote = ""; if (openId && root.synced) root.refreshAttachments(openId) }
           function startDescEdit() {
             descEditor.text = detail.more.desc
             descEditing = true
@@ -2552,9 +2892,47 @@ Item {
                   }
                 }
 
+                Flow {
+                  width: parent.width
+                  spacing: 8
+                  Rectangle {
+                    objectName: "detailComplete"
+                    width: completionText.implicitWidth + 24; height: 30; radius: 15
+                    readonly property bool done: !!detail.card && !!detail.card.dueComplete
+                    enabled: !!detail.card && (!root.synced || root.writesInFlight === 0)
+                    color: done ? Qt.alpha("#5be38c", 0.24) : (completionHover.hovered ? root.cardHover : "transparent")
+                    border.width: 1; border.color: done ? "#5be38c" : root.cardBorder
+                    Plain { id: completionText; anchors.centerIn: parent; font.pixelSize: 12; color: parent.done ? "#5be38c" : root.textColor; text: parent.done ? "\uf00c Completed · Mark incomplete" : "\uf00c Mark card complete" }
+                    HoverHandler { id: completionHover; cursorShape: Qt.PointingHandCursor }
+                    TapHandler { onTapped: root.toggleComplete(root.openCardId) }
+                  }
+                  Rectangle {
+                    visible: root.synced
+                    width: automationsText.implicitWidth + 24; height: 30; radius: 15
+                    color: automationsHover.hovered ? root.cardHover : "transparent"
+                    border.width: 1; border.color: root.cardBorder
+                    Plain { id: automationsText; anchors.centerIn: parent; font.pixelSize: 12; text: "Open automations  \uf08e" }
+                    HoverHandler { id: automationsHover; cursorShape: Qt.PointingHandCursor }
+                    TapHandler { onTapped: root.openAutomations() }
+                  }
+                }
+
+                CkField {
+                  width: parent.width
+                  hint: "Save as template: enter a name, then Enter"
+                  enabled: !root.batchBusy
+                  onSubmitted: function(name) { root.saveTemplate(root.openCardId, name) }
+                }
+                Plain {
+                  width: parent.width; wrapMode: Text.WordWrap
+                  font.pixelSize: 11; color: root.mutedColor
+                  text: root.toolsMessage
+                  visible: root.toolsMessage.length > 0
+                }
+
                 // Labels, with their names
                 Flow {
-                  visible: !!detail.card
+                  visible: root.synced && !!detail.card
                   width: parent.width
                   spacing: 6
                   Repeater {
@@ -2659,7 +3037,7 @@ Item {
 
                 // Due date, attachments, members
                 Flow {
-                  visible: !!detail.card
+                  visible: root.synced && !!detail.card
                   width: parent.width
                   spacing: 12
                   Rectangle {
@@ -3128,6 +3506,7 @@ Item {
 
                 // Attachments
                 Column {
+                  visible: root.synced
                   width: parent.width
                   spacing: 6
                   Item {
@@ -3364,6 +3743,7 @@ Item {
                 color: root.cardBorder
               }
               Rectangle {
+                visible: root.synced
                 anchors { left: parent.left; leftMargin: 19; verticalCenter: parent.verticalCenter }
                 width: openText.implicitWidth + 22; height: 26; radius: 13
                 color: openHover.hovered ? Qt.alpha(detail.head, 0.3) : Qt.alpha(detail.head, 0.16)
