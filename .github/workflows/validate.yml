@@ -14,8 +14,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '24'
-      - run: node --test tests/storage.test.mjs
+      - run: node --test tests/*.test.mjs
       - name: Check shell syntax and patch whitespace
         run: |
-          bash -n setup.sh tests/workspaces.sh
+          bash -n setup.sh tests/board.sh tests/tools.sh
           git diff --check

@@ -8,7 +8,7 @@ import vm from 'node:vm'
 
 const context = vm.createContext({})
 vm.runInContext(readFileSync(new URL('../Storage.js', import.meta.url), 'utf8').replace('.pragma library', ''), context)
-const qml = readFileSync(new URL('../WorkspaceDesk.qml', import.meta.url), 'utf8')
+const qml = readFileSync(new URL('../BoardDesk.qml', import.meta.url), 'utf8')
 const migration = [...qml.slice(qml.indexOf('Storage.prepare +'), qml.indexOf('"sh", root.dataDir')).matchAll(/'([^'\n]*)'/g)].map(m => m[1]).join('')
 const initialize = context.prepare + migration
 
@@ -34,8 +34,8 @@ test('initialization migrates cards and enforces private file and directory mode
   writeFileSync(join(f.config, 'state.json'), '{}', { mode: 0o666 })
   const result = f.run(); assert.equal(result.status, 0, result.stderr)
   for (const dir of [f.data, f.cache, f.config]) assert.equal(mode(dir), 0o700)
-  for (const file of [join(f.data, 'board.json'), join(f.data, 'workspace-1.json'), join(f.config, 'workspace-1.json')]) assert.equal(mode(file), 0o600)
-  assert.equal(readFileSync(join(f.data, 'workspace-1.json'), 'utf8'), '{"secret":"legacy"}')
+  for (const file of [join(f.data, 'board.json'), join(f.config, 'state.json'), join(f.data, '.shared-board-v1')]) assert.equal(mode(file), 0o600)
+  assert.equal(readFileSync(join(f.data, 'board.json'), 'utf8'), '{"secret":"legacy"}')
   assert.equal(f.run().status, 0)
 })
 
@@ -90,4 +90,29 @@ test('chmod failure aborts initialization', t => {
   writeFileSync(join(bin, 'chmod'), '#!/bin/sh\nexit 1\n', { mode: 0o755 })
   assert.notEqual(f.run({ PATH: bin + ':' + process.env.PATH }).status, 0)
   assert.equal(existsSync(join(f.data, 'workspace-1.json')), false)
+})
+
+
+test('shared-board migration backs up existing data and runs only once', t => {
+  const f = fixture(t)
+  writeFileSync(join(f.data, 'board.json'), '{"cards":"previous shared"}')
+  writeFileSync(join(f.data, 'workspace-1.json'), '{"cards":"workspace"}')
+  writeFileSync(join(f.config, 'state.json'), '{"boardId":"previous"}')
+  writeFileSync(join(f.config, 'workspace-1.json'), '{"boardId":"workspace"}')
+  const result = f.run(); assert.equal(result.status, 0, result.stderr)
+  assert.equal(readFileSync(join(f.data, 'board-before-shared.json'), 'utf8'), '{"cards":"previous shared"}')
+  assert.equal(readFileSync(join(f.config, 'state-before-shared.json'), 'utf8'), '{"boardId":"previous"}')
+  assert.equal(readFileSync(join(f.data, 'board.json'), 'utf8'), '{"cards":"workspace"}')
+  writeFileSync(join(f.data, 'board.json'), '{"cards":"new shared edits"}')
+  assert.equal(f.run().status, 0)
+  assert.equal(readFileSync(join(f.data, 'board.json'), 'utf8'), '{"cards":"new shared edits"}')
+})
+
+test('symlinked migration marker cannot bypass trusted storage checks', t => {
+  const f = fixture(t)
+  const target = join(f.root, 'marker-target')
+  writeFileSync(target, 'untouched', { mode: 0o644 })
+  symlinkSync(target, join(f.data, '.shared-board-v1'))
+  assert.notEqual(f.run().status, 0)
+  assert.equal(mode(target), 0o644)
 })

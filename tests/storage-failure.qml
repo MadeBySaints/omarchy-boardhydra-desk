@@ -2,7 +2,8 @@ import QtQuick
 import Quickshell
 
 ShellRoot {
-  WorkspaceDesk { id: desk; workspace: QtObject { property int id: 901 } }
+  Desk { id: service }
+  readonly property var desk: service.boardDesk
   Timer {
     interval: 1200; running: true
     onTriggered: {
@@ -11,8 +12,10 @@ ShellRoot {
         Qt.exit(1)
         return
       }
-      desk.commitLocal({ columns: [{ title: "Confidential new card", cards: [] }] })
+      desk.commitLocal({ columns: [{ title: "Confidential", cards: [{ id: "secret", text: "Confidential new card" }] }] })
       desk.saveState()
+      desk.templatesLoaded = true
+      desk.saveTemplate(desk.board.columns[0].cards.length ? desk.board.columns[0].cards[0].id : "", "Unsafe template")
       verify.start()
     }
   }
